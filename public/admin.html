@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0b1220" />
+<title>Crew Clock — Owner Dashboard</title>
+<style>
+  :root{
+    --bg:#0b1220; --card:#131c2e; --card2:#1b2740; --text:#eaf0fb; --muted:#93a2bf;
+    --line:#26324b; --blue:#2f6bff; --green:#16c07a; --amber:#f4a723; --red:#f0524f;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  body{margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:var(--bg); color:var(--text); min-height:100dvh;
+    padding: env(safe-area-inset-top) 14px calc(env(safe-area-inset-bottom) + 24px);}
+  .wrap{max-width:720px; margin:0 auto;}
+  header{display:flex; align-items:center; justify-content:space-between; padding:18px 0 10px;}
+  header h1{font-size:19px; margin:0;}
+  .muted{color:var(--muted);}
+  .tabs{display:flex; gap:8px; margin:8px 0 16px; overflow-x:auto;}
+  .tab{background:var(--card); border:1px solid var(--line); color:var(--muted); border-radius:999px;
+    padding:9px 16px; font-size:14px; white-space:nowrap; cursor:pointer;}
+  .tab.on{background:var(--blue); color:#fff; border-color:var(--blue);}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:12px;}
+  .row{display:flex; align-items:center; justify-content:space-between; gap:12px;}
+  .dot{width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:8px;}
+  .pill{font-size:12px; padding:3px 10px; border-radius:999px; font-weight:600;}
+  .name{font-weight:700; font-size:17px;}
+  .sub{color:var(--muted); font-size:13px; margin-top:3px;}
+  .cd{font-variant-numeric:tabular-nums; font-weight:800; font-size:20px;}
+  .cd.warn{color:var(--amber);} .cd.over{color:var(--red);}
+  .btn{border:0; border-radius:10px; padding:9px 14px; font-weight:600; font-size:14px; cursor:pointer; color:#fff;}
+  .btn.blue{background:var(--blue);} .btn.ghost{background:var(--card2); color:var(--text);}
+  .btn.small{padding:6px 12px; font-size:13px;}
+  input,select{background:var(--card2); border:1px solid var(--line); color:var(--text);
+    border-radius:10px; padding:11px 12px; font-size:15px; width:100%;}
+  label{font-size:13px; color:var(--muted); display:block; margin:10px 0 5px;}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+  table{width:100%; border-collapse:collapse; font-size:14px;}
+  td,th{text-align:left; padding:10px 6px; border-bottom:1px solid var(--line);}
+  th{color:var(--muted); font-weight:600; font-size:12px;}
+  .strike{text-decoration:line-through; color:var(--muted);}
+  .login{max-width:340px; margin:15vh auto 0; text-align:center;}
+  .hidden{display:none;}
+  .kpi{display:flex; gap:10px; margin-bottom:14px;}
+  .kpi .card{flex:1; text-align:center; padding:14px 8px; margin:0;}
+  .kpi b{font-size:22px; display:block;} .kpi span{font-size:12px; color:var(--muted);}
+  h3{font-size:15px; margin:2px 0 12px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Login -->
+  <div id="login" class="login">
+    <h1>🔒 Owner Dashboard</h1>
+    <p class="muted">Enter your PIN</p>
+    <input id="pin" type="password" inputmode="numeric" placeholder="PIN" style="text-align:center; font-size:22px; letter-spacing:4px;" />
+    <button class="btn blue" style="width:100%; margin-top:12px; padding:13px;" onclick="login()">Enter</button>
+    <p id="loginErr" class="muted" style="color:var(--red);"></p>
+  </div>
+
+  <!-- App -->
+  <div id="app" class="hidden">
+    <header>
+      <h1>🧽 Crew Clock</h1>
+      <button class="btn ghost small" onclick="logout()">Lock</button>
+    </header>
+
+    <div class="tabs">
+      <div class="tab on" data-tab="live" onclick="showTab('live')">Live crew</div>
+      <div class="tab" data-tab="penalties" onclick="showTab('penalties')">Penalties</div>
+      <div class="tab" data-tab="log" onclick="showTab('log')">Today's log</div>
+      <div class="tab" data-tab="workers" onclick="showTab('workers')">Workers</div>
+      <div class="tab" data-tab="settings" onclick="showTab('settings')">Settings</div>
+    </div>
+
+    <div id="tab-live"></div>
+    <div id="tab-penalties" class="hidden"></div>
+    <div id="tab-log" class="hidden"></div>
+    <div id="tab-workers" class="hidden"></div>
+    <div id="tab-settings" class="hidden"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id)=>document.getElementById(id);
+let PIN = localStorage.getItem('crew_pin') || '';
+let skew = 0, tickTimer=null, pollTimer=null, cur='live';
+let settingsCache = {travelMinutes:30, penaltyHours:1, hourlyRate:0, currency:'£'};
+
+function hdr(){ return {'Content-Type':'application/json','x-admin-pin':PIN}; }
+const initials=(n)=>n.split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase();
+
+async function login(){
+  const pin = $('pin').value.trim();
+  const ok = await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin})}).then(r=>r.json());
+  if(ok.ok){ PIN=pin; localStorage.setItem('crew_pin',pin); enter(); }
+  else $('loginErr').textContent='Wrong PIN, try again.';
+}
+function logout(){ localStorage.removeItem('crew_pin'); PIN=''; clearInterval(pollTimer); clearInterval(tickTimer); $('app').classList.add('hidden'); $('login').classList.remove('hidden'); }
+
+function enter(){
+  $('login').classList.add('hidden'); $('app').classList.remove('hidden');
+  showTab('live');
+  clearInterval(pollTimer); pollTimer=setInterval(()=>{ if(cur==='live') loadLive(); }, 12000);
+}
+
+function showTab(t){
+  cur=t;
+  document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('on', el.dataset.tab===t));
+  ['live','penalties','log','workers','settings'].forEach(x=>$('tab-'+x).classList.toggle('hidden', x!==t));
+  if(t==='live') loadLive();
+  if(t==='penalties') loadPenalties();
+  if(t==='log') loadLog();
+  if(t==='workers') loadWorkers();
+  if(t==='settings') loadSettings();
+}
+
+const STATE_META = {
+  off:{txt:'Clocked out', c:'#93a2bf'}, idle:{txt:'On shift (idle)', c:'#2f6bff'},
+  working:{txt:'Working', c:'#16c07a'}, traveling:{txt:'Travelling', c:'#f4a723'},
+  late:{txt:'OVERDUE', c:'#f0524f'},
+};
+
+async function loadLive(){
+  const d = await fetch('/api/admin/overview',{headers:hdr()}).then(r=>r.json());
+  if(d.error) return logout();
+  skew = d.serverNow - Date.now();
+  settingsCache = d.settings;
+  const box = $('tab-live');
+  const onNow = d.crew.filter(c=>c.state!=='off').length;
+  const late = d.crew.filter(c=>c.state==='late').length;
+  const penToday = d.crew.reduce((s,c)=>s+c.summary.penalties,0);
+
+  let html = `<div class="kpi">
+    <div class="card"><b>${onNow}</b><span>on shift now</span></div>
+    <div class="card"><b style="color:${late?'var(--red)':'inherit'}">${late}</b><span>overdue</span></div>
+    <div class="card"><b style="color:${penToday?'var(--red)':'inherit'}">${penToday}</b><span>penalties today</span></div>
+  </div>`;
+
+  if(!d.crew.length) html += `<div class="card muted">No workers yet — add them in the <b>Workers</b> tab, then share your link.</div>`;
+
+  for(const c of d.crew){
+    const m = STATE_META[c.state];
+    const cd = c.state==='traveling' ? `<span class="cd" data-deadline="${c.deadline}">--:--</span>` : '';
+    const pen = c.summary.penalties>0 ? `<span class="pill" style="background:rgba(240,82,79,.15);color:#ff9d9b">${c.summary.penalties} pen</span>` : '';
+    html += `<div class="card"><div class="row">
+        <div class="row" style="gap:10px;">
+          <span style="width:38px;height:38px;border-radius:50%;background:${m.c};display:grid;place-items:center;font-weight:700;color:#0b1220">${initials(c.name)}</span>
+          <div><div class="name">${c.name}</div>
+          <div class="sub"><span class="dot" style="background:${m.c}"></span>${m.txt} · ${c.summary.jobsDone} jobs · ${(c.summary.workedMinutes/60).toFixed(1).replace('.0','')}h</div></div>
+        </div>
+        <div style="text-align:right">${cd}<div>${pen}</div></div>
+      </div></div>`;
+  }
+  box.innerHTML = html;
+  startTicks();
+}
+
+function startTicks(){
+  clearInterval(tickTimer);
+  tickTimer = setInterval(()=>{
+    document.querySelectorAll('.cd[data-deadline]').forEach(el=>{
+      const dl = Number(el.dataset.deadline);
+      let left = Math.round((dl - (Date.now()+skew))/1000);
+      el.classList.remove('warn','over');
+      if(left<=0){ el.textContent='00:00'; el.classList.add('over'); return; }
+      if(left<=300) el.classList.add('warn');
+      el.textContent = `${String(Math.floor(left/60)).padStart(2,'0')}:${String(left%60).padStart(2,'0')}`;
+    });
+  }, 1000);
+}
+
+const fmtTime = (t)=> new Date(t).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+const fmtDate = (t)=> new Date(t).toLocaleDateString([], {day:'numeric', month:'short'});
+
+async function loadPenalties(){
+  const rows = await fetch('/api/admin/penalties',{headers:hdr()}).then(r=>r.json());
+  const cur = settingsCache;
+  let html = `<h3>Penalties &nbsp;<span class="muted" style="font-weight:400">tap to waive / restore</span></h3>`;
+  if(!rows.length) html += `<div class="card muted">No penalties yet. 🎉</div>`;
+  else {
+    html += `<div class="card" style="padding:6px 12px"><table><tr><th>When</th><th>Worker</th><th>Late</th><th>Docked</th><th></th></tr>`;
+    for(const p of rows){
+      const money = cur.hourlyRate>0 ? ` (${cur.currency}${(p.hours_docked*cur.hourlyRate).toFixed(0)})` : '';
+      html += `<tr>
+        <td class="${p.waived?'strike':''}">${fmtDate(p.created_at)} ${fmtTime(p.created_at)}</td>
+        <td class="${p.waived?'strike':''}">${p.worker_name}</td>
+        <td class="${p.waived?'strike':''}">${p.minutes_late}m</td>
+        <td class="${p.waived?'strike':''}">${p.hours_docked}h${money}</td>
+        <td><button class="btn ${p.waived?'ghost':'blue'} small" onclick="waive(${p.id},${p.waived?0:1})">${p.waived?'Restore':'Waive'}</button></td>
+      </tr>`;
+    }
+    html += `</table></div>`;
+  }
+  $('tab-penalties').innerHTML = html;
+}
+async function waive(id, waived){
+  await fetch(`/api/admin/penalties/${id}/waive`,{method:'POST',headers:hdr(),body:JSON.stringify({waived})});
+  loadPenalties();
+}
+
+async function loadLog(){
+  const rows = await fetch('/api/admin/log',{headers:hdr()}).then(r=>r.json());
+  let html = `<h3>Today's activity</h3>`;
+  if(!rows.length) html += `<div class="card muted">Nothing yet today.</div>`;
+  else{
+    html += `<div class="card" style="padding:6px 12px"><table>`;
+    for(const e of rows) html += `<tr><td style="width:70px" class="muted">${fmtTime(e.t)}</td><td><b>${e.name}</b></td><td>${e.type}</td></tr>`;
+    html += `</table></div>`;
+  }
+  $('tab-log').innerHTML = html;
+}
+
+async function loadWorkers(){
+  const list = await fetch('/api/workers').then(r=>r.json());
+  let html = `<div class="card"><label>Add a worker</label>
+    <div class="row"><input id="newWorker" placeholder="Full name" />
+    <button class="btn blue" onclick="addWorker()">Add</button></div></div>`;
+  html += `<h3>Your crew</h3>`;
+  if(!list.length) html += `<div class="card muted">No workers yet.</div>`;
+  for(const w of list){
+    html += `<div class="card row"><div class="row" style="gap:10px"><span style="width:34px;height:34px;border-radius:50%;background:var(--blue);display:grid;place-items:center;font-weight:700">${initials(w.name)}</span><b>${w.name}</b></div>
+      <button class="btn ghost small" onclick="removeWorker(${w.id},'${w.name.replace(/'/g,"")}')">Remove</button></div>`;
+  }
+  $('tab-workers').innerHTML = html;
+}
+async function addWorker(){
+  const name = $('newWorker').value.trim();
+  if(!name) return;
+  await fetch('/api/admin/workers',{method:'POST',headers:hdr(),body:JSON.stringify({name})});
+  loadWorkers();
+}
+async function removeWorker(id,name){
+  if(!confirm('Remove '+name+'? Their past records are kept.')) return;
+  await fetch(`/api/admin/workers/${id}/remove`,{method:'POST',headers:hdr(),body:JSON.stringify({})});
+  loadWorkers();
+}
+
+async function loadSettings(){
+  const d = await fetch('/api/admin/overview',{headers:hdr()}).then(r=>r.json());
+  const s = d.settings; settingsCache = s;
+  $('tab-settings').innerHTML = `
+   <div class="card">
+     <div class="grid2">
+       <div><label>Travel window (minutes)</label><input id="setTravel" type="number" value="${s.travelMinutes}"></div>
+       <div><label>Penalty (hours docked)</label><input id="setPen" type="number" step="0.5" value="${s.penaltyHours}"></div>
+       <div><label>Hourly rate (0 = hide money)</label><input id="setRate" type="number" value="${s.hourlyRate}"></div>
+       <div><label>Currency symbol</label><input id="setCur" value="${s.currency}"></div>
+     </div>
+     <button class="btn blue" style="margin-top:14px" onclick="saveSettings()">Save settings</button>
+     <p id="setMsg" class="muted"></p>
+   </div>
+   <div class="card">
+     <h3>Share with your crew</h3>
+     <p class="muted" style="margin-top:0">Send this link on WhatsApp. They tap their name — no login needed:</p>
+     <input id="shareUrl" readonly value="${location.origin}">
+     <button class="btn ghost" style="margin-top:10px" onclick="copyLink()">Copy link</button>
+   </div>`;
+}
+async function saveSettings(){
+  const body = {
+    travel_minutes: $('setTravel').value, penalty_hours: $('setPen').value,
+    hourly_rate: $('setRate').value, currency: $('setCur').value,
+  };
+  await fetch('/api/admin/settings',{method:'POST',headers:hdr(),body:JSON.stringify(body)});
+  $('setMsg').textContent = 'Saved ✓';
+}
+function copyLink(){ navigator.clipboard.writeText($('shareUrl').value); }
+
+// auto-enter if PIN saved
+if(PIN){ enter(); } else { $('pin').focus(); }
+$('pin')?.addEventListener('keydown', e=>{ if(e.key==='Enter') login(); });
+</script>
+</body>
+</html>

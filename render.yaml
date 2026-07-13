@@ -1,0 +1,18 @@
+# One-click deploy config for Render (https://render.com).
+# A persistent disk keeps your clock-in history safe across restarts.
+services:
+  - type: web
+    name: crew-clock
+    runtime: node
+    plan: starter          # "starter" allows a disk so data survives restarts. Use "free" to try it $0 (history may reset on redeploy).
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: ADMIN_PIN
+        sync: false        # Render will ask you to type your own secret PIN
+      - key: DB_PATH
+        value: /data/crew.db
+    disk:
+      name: crew-data
+      mountPath: /data
+      sizeGB: 1

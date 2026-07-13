@@ -1,0 +1,5 @@
+node_modules/
+crew.db
+crew.db-wal
+crew.db-shm
+*.log

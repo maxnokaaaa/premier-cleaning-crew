@@ -1,0 +1,17 @@
+{
+  "name": "crew-clock",
+  "version": "1.0.0",
+  "description": "Clock-in / clock-out and 30-minute travel leash for a mobile cleaning crew.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2"
+  }
+}
