@@ -116,10 +116,14 @@ db.exec(`
   );
 `);
 
-// Lightweight migration: add columns to the existing jobs table if missing.
+// Lightweight migrations: add columns to existing tables if missing.
 const jobCols = db.prepare('PRAGMA table_info(jobs)').all().map((c) => c.name);
 if (!jobCols.includes('assignment_id')) {
   db.exec('ALTER TABLE jobs ADD COLUMN assignment_id INTEGER');
+}
+const asgCols = db.prepare('PRAGMA table_info(assignments)').all().map((c) => c.name);
+if (!asgCols.includes('calendar_uid')) {
+  db.exec('ALTER TABLE assignments ADD COLUMN calendar_uid TEXT'); // links to a Google Calendar event
 }
 
 // Default settings (only inserted once).
@@ -132,6 +136,7 @@ const DEFAULT_SETTINGS = {
   brand_color: '#1f7a4d', // Premier Cleaning green
   require_photo: '1',     // must add an after-photo before finishing a scheduled job
   require_checklist: '1', // must tick every checklist item before finishing
+  calendar_ical_url: '',  // Premier calendar "Secret address in iCal format" — jobs flow in from here
 };
 const insertSetting = db.prepare(
   'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)'

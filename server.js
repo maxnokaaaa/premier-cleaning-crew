@@ -2,10 +2,13 @@
 // Worker phone app (/) + owner dashboard (/admin) + JSON API.
 // Features: clock in/out, 30-min travel leash with auto penalties, GPS proof,
 // job scheduling, per-job checklists + photo proof, payroll, announcements.
+// Malta business — anchor all "today" calculations to Malta local time even on a UTC host.
+process.env.TZ = process.env.TZ || 'Europe/Malta';
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const express = require('express');
+const ical = require('node-ical');
 const { db } = require('./db');
 
 const app = express();
@@ -30,6 +33,82 @@ const brand = () => ({ businessName: getSetting('business_name'), brandColor: ge
 
 const startOfToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
 const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+
+// ---------- Premier calendar (iCal) integration ----------
+let calCache = { url: null, at: 0, events: [] };
+async function loadCalendar() {
+  const url = getSetting('calendar_ical_url');
+  if (!url) return [];
+  if (calCache.url === url && Date.now() - calCache.at < 120000) return calCache.events; // 2-min cache
+  try {
+    const data = await ical.async.fromURL(url);
+    const events = Object.values(data).filter((e) => e && e.type === 'VEVENT');
+    calCache = { url, at: Date.now(), events };
+    return events;
+  } catch (err) {
+    console.error('Calendar fetch failed:', err.message);
+    return calCache.url === url ? calCache.events : [];
+  }
+}
+// Pull a labelled field out of a Premier job-sheet description (e.g. "Client: ...", "Address: ...").
+function pick(desc, labels) {
+  for (const l of labels) {
+    const m = (desc || '').match(new RegExp(l + '\\s*:?\\s*([^\\n]+)', 'i'));
+    if (m && m[1].trim()) return m[1].trim();
+  }
+  return '';
+}
+function cleanTitle(s) {
+  return (s || 'Job').replace(/➡️?\s*MOVED[^—]*—\s*/i, '').replace(/^[\s←-⇿\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]+/u, '').trim();
+}
+function toJob(e, occStart) {
+  const desc = e.description || '';
+  const start = occStart || e.start;
+  const dateStr = start ? `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}` : '';
+  return {
+    uid: (e.uid || e.summary || 'job') + '::' + dateStr,
+    client: (pick(desc, ['Client']).split(/[,;]/)[0].trim()) || cleanTitle(e.summary),
+    title: cleanTitle(e.summary),
+    address: e.location || pick(desc, ['Address', 'Property', 'Where', 'Location']) || '',
+    details: desc.trim(),
+    start: start ? start.getTime() : null,
+    end: e.end ? e.end.getTime() : null,
+  };
+}
+const inDay = (d, a, b) => d && d.getTime() >= a && d.getTime() < b;
+async function calendarJobsForDate(dateStr) {
+  const events = await loadCalendar();
+  const dayStart = new Date(dateStr + 'T00:00:00').getTime();
+  const dayEnd = dayStart + 24 * 3600 * 1000;
+  const out = [];
+  for (const e of events) {
+    if (e.status === 'CANCELLED') continue;
+    if (/DO NOT WORK FROM|REFERENCE COPY ONLY/i.test(e.description || '')) continue;
+    try {
+      if (e.rrule) {
+        for (const occ of e.rrule.between(new Date(dayStart - 86400000), new Date(dayEnd + 86400000), true)) {
+          if (!inDay(occ, dayStart, dayEnd)) continue;
+          const key = occ.toISOString().slice(0, 10);
+          if (e.exdate && e.exdate[key]) continue;
+          if (e.recurrences && e.recurrences[key]) out.push(toJob(e.recurrences[key]));
+          else out.push(toJob(e, occ));
+        }
+      } else if (inDay(e.start, dayStart, dayEnd)) {
+        out.push(toJob(e));
+      }
+    } catch (err) { /* skip malformed event */ }
+  }
+  out.sort((a, b) => (a.start || 0) - (b.start || 0));
+  return out;
+}
+// Merge calendar jobs with a worker's own assignment status for them.
+function annotateForWorker(jobs, workerId) {
+  return jobs.map((j) => {
+    const a = db.prepare('SELECT status FROM assignments WHERE worker_id = ? AND calendar_uid = ?').get(workerId, j.uid);
+    const anyone = db.prepare('SELECT w.name FROM assignments a JOIN workers w ON w.id = a.worker_id WHERE a.calendar_uid = ? AND a.worker_id != ?').all(j.uid, workerId);
+    return { ...j, myStatus: a ? a.status : 'open', othersOn: anyone.map((r) => r.name) };
+  });
+}
 
 // ---------- reusable statements ----------
 const openShiftFor = db.prepare('SELECT * FROM shifts WHERE worker_id = ? AND clock_out IS NULL ORDER BY clock_in DESC LIMIT 1');
@@ -77,7 +156,7 @@ function assignmentDetail(a) {
   const photos = db.prepare('SELECT id, filename, created_at FROM photos WHERE assignment_id = ? ORDER BY created_at').all(a.id);
   return {
     id: a.id, title: a.title, address: a.address, notes: a.notes,
-    scheduledAt: a.scheduled_at, status: a.status,
+    scheduledAt: a.scheduled_at, status: a.status, calendarUid: a.calendar_uid || null,
     checklist, photos: photos.map((p) => ({ id: p.id, url: `/uploads/${p.filename}`, at: p.created_at })),
     photoCount: photos.length,
   };
@@ -117,7 +196,7 @@ app.get('/api/workers', (req, res) => {
   res.json(db.prepare('SELECT id, name FROM workers WHERE active = 1 ORDER BY sort_order, name').all());
 });
 
-app.get('/api/me/:id', (req, res) => {
+app.get('/api/me/:id', async (req, res) => {
   const id = Number(req.params.id);
   const worker = db.prepare('SELECT id, name FROM workers WHERE id = ?').get(id);
   if (!worker) return res.status(404).json({ error: 'not found' });
@@ -139,6 +218,7 @@ app.get('/api/me/:id', (req, res) => {
     currentJob: st.job ? { id: st.job.id, name: st.job.name, startedAt: st.job.started_at, assignmentId: st.job.assignment_id } : null,
     currentAssignment,
     assignments: todaysAssignments(id),
+    calendarJobs: annotateForWorker(await calendarJobsForDate(todayStr()), id),
     announcement,
     travelMinutes: Number(getSetting('travel_minutes')),
     requirePhoto: getSetting('require_photo') === '1',
@@ -172,6 +252,31 @@ app.post('/api/start-job', (req, res) => {
   if (assignmentId) db.prepare("UPDATE assignments SET status='in_progress', job_id=? WHERE id=?").run(info.lastInsertRowid, assignmentId);
   recordLocation(id, req.body, 'start_job');
   res.json({ ok: true });
+});
+
+// Worker taps a client from the Premier calendar; we materialise it as their job.
+app.post('/api/start-calendar-job', (req, res) => {
+  const id = Number(req.body.workerId);
+  const shift = openShiftFor.get(id);
+  if (!shift) return res.status(400).json({ error: 'not clocked in' });
+  if (openJobFor.get(id)) return res.json({ ok: true });
+  const { uid, client, title, address, details, scheduledAt } = req.body;
+  if (!uid) return res.status(400).json({ error: 'no job' });
+  let a = db.prepare('SELECT * FROM assignments WHERE worker_id = ? AND calendar_uid = ?').get(id, uid);
+  if (!a) {
+    const info = db.prepare(
+      'INSERT INTO assignments (worker_id, title, address, notes, date, scheduled_at, calendar_uid, status, sort_order, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)'
+    ).run(id, (client || title || 'Job').toString().slice(0, 120), (address || '').toString().slice(0, 200) || null, (details || '').toString() || null, todayStr(), scheduledAt || null, uid, 'in_progress', 0, Date.now());
+    a = db.prepare('SELECT * FROM assignments WHERE id = ?').get(info.lastInsertRowid);
+  }
+  const jobInfo = db.prepare('INSERT INTO jobs (worker_id, shift_id, name, started_at, assignment_id) VALUES (?,?,?,?,?)').run(id, shift.id, a.title, Date.now(), a.id);
+  db.prepare("UPDATE assignments SET status='in_progress', job_id=? WHERE id=?").run(jobInfo.lastInsertRowid, a.id);
+  recordLocation(id, req.body, 'start_job');
+  res.json({ ok: true });
+});
+
+app.get('/api/calendar', async (req, res) => {
+  res.json(await calendarJobsForDate((req.query.date || todayStr()).toString()));
 });
 
 app.post('/api/finish-job', (req, res) => {
@@ -262,6 +367,7 @@ app.get('/api/admin/overview', requireAdmin, (req, res) => {
       travelMinutes: Number(getSetting('travel_minutes')), penaltyHours: penaltyHours(),
       hourlyRate: Number(getSetting('hourly_rate')), currency: getSetting('currency'),
       requirePhoto: getSetting('require_photo') === '1', requireChecklist: getSetting('require_checklist') === '1',
+      calendarIcalUrl: getSetting('calendar_ical_url') || '',
       ...brand(),
     },
     serverNow: Date.now(),
@@ -306,7 +412,7 @@ app.post('/api/admin/workers/:id/remove', requireAdmin, (req, res) => {
 });
 
 app.post('/api/admin/settings', requireAdmin, (req, res) => {
-  const allowed = ['travel_minutes', 'penalty_hours', 'hourly_rate', 'currency', 'business_name', 'brand_color', 'require_photo', 'require_checklist'];
+  const allowed = ['travel_minutes', 'penalty_hours', 'hourly_rate', 'currency', 'business_name', 'brand_color', 'require_photo', 'require_checklist', 'calendar_ical_url'];
   for (const key of allowed) if (req.body[key] !== undefined) setSetting.run(key, String(req.body[key]));
   res.json({ ok: true });
 });
@@ -355,6 +461,15 @@ app.get('/api/admin/assignment/:id', requireAdmin, (req, res) => {
     ...assignmentDetail(a), workerName: a.worker_name, date: a.date,
     photos: photos.map((p) => ({ id: p.id, url: `/uploads/${p.filename}`, at: p.created_at, lat: p.lat, lng: p.lng })),
   });
+});
+
+// ---- calendar (owner view: which workers are on each job) ----
+app.get('/api/admin/calendar', requireAdmin, async (req, res) => {
+  const jobs = await calendarJobsForDate((req.query.date || todayStr()).toString());
+  res.json(jobs.map((j) => ({
+    ...j,
+    workers: db.prepare('SELECT w.name, a.status FROM assignments a JOIN workers w ON w.id = a.worker_id WHERE a.calendar_uid = ?').all(j.uid),
+  })));
 });
 
 // ---- announcements ----

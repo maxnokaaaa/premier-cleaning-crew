@@ -153,16 +153,32 @@ function startTicks(){
 
 // ---------- Schedule ----------
 async function loadSchedule(){
-  const workers=await fetch('/api/workers').then(r=>r.json());
-  const items=await fetch('/api/admin/assignments?date='+schedDate,{headers:hdr()}).then(r=>r.json());
-  let html=`<div class="card"><h3>➕ Assign a job</h3>
+  const [workers, items, calJobs] = await Promise.all([
+    fetch('/api/workers').then(r=>r.json()),
+    fetch('/api/admin/assignments?date='+schedDate,{headers:hdr()}).then(r=>r.json()),
+    fetch('/api/admin/calendar?date='+schedDate,{headers:hdr()}).then(r=>r.json()).catch(()=>[]),
+  ]);
+  let html=`<div class="row" style="margin:2px 4px 10px"><h3 style="margin:0">📅 Jobs from your Premier calendar</h3>
+    <input type="date" style="width:auto" value="${schedDate}" onchange="schedDate=this.value; loadSchedule()"></div>`;
+  if(!calJobs.length) html+=`<div class="card muted">No calendar jobs for this day. If that's unexpected, add your calendar link in <b>Settings</b>.</div>`;
+  for(const j of calJobs){
+    const who=(j.workers&&j.workers.length)?j.workers.map(w=>`${escapeHtml(w.name)} <span class="badge ${w.status==='done'?'b-done':'b-progress'}">${w.status==='done'?'done ✓':'on it'}</span>`).join(' &nbsp; '):'<span class="muted">not started yet</span>';
+    html+=`<div class="card"><div class="name">${escapeHtml(j.client)}${j.start?' &nbsp;<span class="sub">'+fmtTime(j.start)+'</span>':''}</div>`;
+    if(j.title && j.title.toLowerCase()!==j.client.toLowerCase()) html+=`<div class="sub">${escapeHtml(j.title)}</div>`;
+    if(j.address) html+=`<div style="margin-top:5px"><a class="maplink" href="https://maps.google.com/?q=${encodeURIComponent(j.address)}" target="_blank">📍 ${escapeHtml(j.address)}</a></div>`;
+    html+=`<div class="sub" style="margin-top:7px">👤 ${who}</div>`;
+    if(j.details) html+=`<details style="margin-top:7px"><summary style="color:var(--blue);cursor:pointer">Job details</summary><div style="white-space:pre-wrap;margin-top:6px;font-size:13px;line-height:1.5">${escapeHtml(j.details)}</div></details>`;
+    html+=`</div>`;
+  }
+
+  html+=`<div class="card" style="margin-top:16px"><h3>➕ Assign an extra (non-calendar) job</h3>
     <div class="grid2">
       <div><label>Worker</label><select id="asgWorker">${workers.map(w=>`<option value="${w.id}">${escapeHtml(w.name)}</option>`).join('')}</select></div>
       <div><label>Date</label><input id="asgDate" type="date" value="${schedDate}"></div>
     </div>
     <label>Job title</label><input id="asgTitle" placeholder="e.g. Oak Street flat — full clean">
     <div class="grid2">
-      <div><label>Address</label><input id="asgAddr" placeholder="12 Oak Street, London"></div>
+      <div><label>Address</label><input id="asgAddr" placeholder="12 Oak Street, Sliema"></div>
       <div><label>Start time (optional)</label><input id="asgTime" type="time"></div>
     </div>
     <label>Notes for the cleaner (optional)</label><input id="asgNotes" placeholder="Key under the mat, dog friendly">
@@ -171,9 +187,7 @@ async function loadSchedule(){
     <button class="btn brand" style="margin-top:12px" onclick="addAssignment()">Add job to schedule</button>
   </div>`;
 
-  html+=`<div class="row" style="margin:14px 4px 8px"><h3 style="margin:0">Schedule for</h3>
-    <input type="date" style="width:auto" value="${schedDate}" onchange="schedDate=this.value; loadSchedule()"></div>`;
-  if(!items.length) html+=`<div class="card muted">No jobs scheduled for this day yet.</div>`;
+  if(items.length) html+=`<div class="section-title" style="font-size:13px;color:var(--muted);margin:16px 4px 8px">Extra jobs for this day</div>`;
   for(const a of items){
     const badge=a.status==='done'?'<span class="badge b-done">Done ✓</span>':a.status==='in_progress'?'<span class="badge b-progress">In progress</span>':'<span class="badge b-assigned">To do</span>';
     const done=a.checklist.filter(c=>c.done).length;
@@ -305,6 +319,12 @@ async function loadSettings(){
      <label style="display:flex;align-items:center;gap:10px;margin-top:8px"><input type="checkbox" id="setReqCheck" ${s.requireChecklist?'checked':''} style="width:auto"> Require all checklist items ticked before finishing</label>
      <button class="btn brand" style="margin-top:14px" onclick="saveSettings()">Save settings</button><span id="setMsg" class="muted" style="margin-left:10px"></span>
    </div>
+   <div class="card"><h3>📅 Premier calendar link</h3>
+     <p class="muted" style="margin-top:0">Paste your Premier calendar's <b>Secret address in iCal format</b> (Google Calendar → the calendar's Settings → "Integrate calendar"). Each day's jobs then appear automatically for your cleaners to pick.</p>
+     <input id="setCal" placeholder="https://calendar.google.com/calendar/ical/.../basic.ics" value="${escapeHtml(s.calendarIcalUrl||'')}">
+     <button class="btn brand" style="margin-top:10px" onclick="saveSettings()">Save calendar link</button>
+     <span id="setMsg2" class="muted" style="margin-left:10px"></span>
+   </div>
    <div class="card"><h3>Share with your crew</h3>
      <p class="muted" style="margin-top:0">Send this link on WhatsApp — they tap their name, no login:</p>
      <input id="shareUrl" readonly value="${location.origin}">
@@ -313,9 +333,10 @@ async function loadSettings(){
 }
 async function saveSettings(){
   const body={ travel_minutes:$('setTravel').value, penalty_hours:$('setPen').value, hourly_rate:$('setRate').value, currency:$('setCur').value,
-    business_name:$('setName').value, brand_color:$('setColor').value, require_photo:$('setReqPhoto').checked?1:0, require_checklist:$('setReqCheck').checked?1:0 };
+    business_name:$('setName').value, brand_color:$('setColor').value, require_photo:$('setReqPhoto').checked?1:0, require_checklist:$('setReqCheck').checked?1:0,
+    calendar_ical_url:$('setCal')?$('setCal').value.trim():undefined };
   await fetch('/api/admin/settings',{method:'POST',headers:hdr(),body:JSON.stringify(body)});
-  $('setMsg').textContent='Saved ✓'; document.documentElement.style.setProperty('--brand', body.brand_color); $('bizName').textContent=body.business_name;
+  $('setMsg').textContent='Saved ✓'; if($('setMsg2'))$('setMsg2').textContent='Saved ✓'; document.documentElement.style.setProperty('--brand', body.brand_color); $('bizName').textContent=body.business_name;
 }
 
 if(PIN){ enter(); } else { $('pin').focus(); }

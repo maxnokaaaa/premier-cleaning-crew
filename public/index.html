@@ -181,6 +181,8 @@ async function refresh(){
   $('sHours').textContent=(d.summary.workedMinutes/60).toFixed(1).replace('.0','')+'h';
   $('sPen').textContent=d.summary.penalties; $('sPenWrap').classList.toggle('bad', d.summary.penalties>0);
 
+  window._calJobs = {};
+  (d.calendarJobs||[]).forEach(j=>window._calJobs[j.uid]=j);
   renderAnnounce(d.announcement);
   renderActions(d);
   renderCurrentJob(d);
@@ -208,12 +210,38 @@ function renderActions(d){
   const box=$('actions'); box.innerHTML='';
   const add=(label,cls,fn)=>{ const b=document.createElement('button'); b.className='btn '+cls; b.textContent=label; b.onclick=fn; box.appendChild(b); };
   if(d.state==='off'){ add('🟢  Clock In','brand',()=>act('/api/clock-in')); return; }
-  if((d.state==='idle'||d.state==='traveling'||d.state==='late')){
-    const next=(d.assignments||[]).find(a=>a.status!=='done');
-    if(next) add((d.state==='idle'?'▶️  Start: ':'📍  Arrived — Start: ')+next.title,'green',()=>act('/api/start-job',{assignmentId:next.id}));
-    else add('▶️  Start Unscheduled Job','green',()=>act('/api/start-job'));
-  }
+  if(d.state==='traveling'||d.state==='late'){ box.insertAdjacentHTML('beforeend','<p class="sub" style="text-align:center;margin:6px 0 0">👇 Tap your next client below to start</p>'); }
+  if(d.state==='idle'||d.state==='traveling'||d.state==='late'){ add('▶️  Start an unscheduled job','ghost',()=>act('/api/start-job')); }
   add('⏹  Clock Out (end of day)','ghost',()=>{ if(confirm('Clock out for the day?')) act('/api/clock-out'); });
+}
+
+async function startCal(uid){
+  const j=window._calJobs[uid]; if(!j) return;
+  const gps=await getGPS();
+  await fetch('/api/start-calendar-job',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({workerId:me.id, uid:j.uid, client:j.client, title:j.title, address:j.address, details:j.details, scheduledAt:j.start, ...gps})});
+  refresh();
+}
+function jobDetails(text){ return `<details style="margin-top:8px"><summary style="color:var(--blue);cursor:pointer;font-size:14px">ℹ️ Tap for full job details</summary><div style="white-space:pre-wrap;margin-top:8px;font-size:14px;line-height:1.5">${escapeHtml(text)}</div></details>`; }
+
+function calCard(j, canStart){
+  const badge=j.myStatus==='done'?'<span class="badge b-done">Done ✓</span>':j.myStatus==='in_progress'?'<span class="badge b-progress">In progress</span>':'';
+  let h=`<div class="job">${badge}<h3>${escapeHtml(j.client)}</h3>`;
+  if(j.title && j.title.toLowerCase()!==j.client.toLowerCase()) h+=`<div class="meta">${escapeHtml(j.title)}</div>`;
+  if(j.start) h+=`<div class="meta">🕒 ${new Date(j.start).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</div>`;
+  if(j.address) h+=`<a class="addr" href="https://maps.google.com/?q=${encodeURIComponent(j.address)}" target="_blank">📍 ${escapeHtml(j.address)}</a>`;
+  if(j.othersOn&&j.othersOn.length) h+=`<div class="meta">👥 also on this job: ${j.othersOn.map(escapeHtml).join(', ')}</div>`;
+  if(j.details) h+=jobDetails(j.details);
+  if(canStart && j.myStatus!=='done') h+=`<button class="btn green" style="margin-top:12px" onclick="startCal('${j.uid.replace(/'/g,"\\'")}')">▶️ I'm doing ${escapeHtml(j.client.split(' ')[0])} — Start</button>`;
+  return h+`</div>`;
+}
+function manualCard(a){
+  const badge=a.status==='done'?'<span class="badge b-done">Done ✓</span>':a.status==='in_progress'?'<span class="badge b-progress">In progress</span>':'<span class="badge b-assigned">To do</span>';
+  let h=`<div class="job">${badge}<h3>${escapeHtml(a.title)}</h3>`;
+  if(a.address) h+=`<a class="addr" href="https://maps.google.com/?q=${encodeURIComponent(a.address)}" target="_blank">📍 ${escapeHtml(a.address)}</a>`;
+  if(a.scheduledAt) h+=`<div class="meta">🕒 ${new Date(a.scheduledAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</div>`;
+  if(a.checklist&&a.checklist.length) h+=`<div class="meta">☑️ ${a.checklist.length} checklist items</div>`;
+  return h+`</div>`;
 }
 
 function renderCurrentJob(d){
@@ -224,7 +252,7 @@ function renderCurrentJob(d){
   const doneCount=a.checklist.filter(c=>c.done).length;
   let html=`<div class="section-title">Current job</div><div class="job active"><h3>${escapeHtml(a.title)}</h3>`;
   if(a.address) html+=`<a class="addr" href="https://maps.google.com/?q=${encodeURIComponent(a.address)}" target="_blank">📍 ${escapeHtml(a.address)}</a>`;
-  if(a.notes) html+=`<div class="meta">📝 ${escapeHtml(a.notes)}</div>`;
+  if(a.notes) html+=`<div class="section-title" style="margin-top:12px">What to do</div><div style="white-space:pre-wrap;font-size:14px;line-height:1.5;max-height:260px;overflow:auto;background:var(--card2);border-radius:10px;padding:12px">${escapeHtml(a.notes)}</div>`;
   if(a.checklist.length){
     html+=`<div class="section-title" style="margin-top:14px">Checklist (${doneCount}/${a.checklist.length})</div>`;
     for(const c of a.checklist) html+=`<div class="check ${c.done?'on':''}" onclick="toggleCheck(${c.id},${c.done?0:1})"><div class="box">${c.done?'✓':''}</div><span>${escapeHtml(c.text)}</span></div>`;
@@ -241,18 +269,21 @@ function renderCurrentJob(d){
 function renderJobList(d){
   const box=$('jobList');
   if(d.state==='off'){ box.innerHTML=''; return; }
-  const list=(d.assignments||[]);
-  if(!list.length){ box.innerHTML=`<div class="section-title">Today's jobs</div><div class="job"><span class="meta">No jobs scheduled for you today. Use the button above for an unscheduled job.</span></div>`; return; }
-  let html=`<div class="section-title">Today's jobs (${list.filter(a=>a.status==='done').length}/${list.length} done)</div>`;
-  for(const a of list){
-    if(d.state==='working' && d.currentAssignment && d.currentAssignment.id===a.id) continue;
-    const badge=a.status==='done'?'<span class="badge b-done">Done ✓</span>':a.status==='in_progress'?'<span class="badge b-progress">In progress</span>':'<span class="badge b-assigned">To do</span>';
-    html+=`<div class="job">${badge}<h3>${escapeHtml(a.title)}</h3>`;
-    if(a.address) html+=`<a class="addr" href="https://maps.google.com/?q=${encodeURIComponent(a.address)}" target="_blank">📍 ${escapeHtml(a.address)}</a>`;
-    if(a.scheduledAt) html+=`<div class="meta">🕒 ${new Date(a.scheduledAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</div>`;
-    if(a.checklist.length) html+=`<div class="meta">☑️ ${a.checklist.length} checklist items</div>`;
-    html+=`</div>`;
+  const canStart=(d.state==='idle'||d.state==='traveling'||d.state==='late');
+  const cal=(d.calendarJobs||[]);
+  const manual=(d.assignments||[]).filter(a=>!a.calendarUid);
+  const curUid=d.currentAssignment?d.currentAssignment.calendarUid:null;
+  const curId=d.currentAssignment?d.currentAssignment.id:null;
+  let html='';
+  if(cal.length){
+    html+=`<div class="section-title">Today's clients — tap yours (${cal.filter(j=>j.myStatus==='done').length}/${cal.length} done)</div>`;
+    for(const j of cal){ if(d.state==='working'&&curUid===j.uid) continue; html+=calCard(j, canStart); }
   }
+  if(manual.length){
+    html+=`<div class="section-title">Extra jobs assigned to you</div>`;
+    for(const a of manual){ if(d.state==='working'&&curId===a.id) continue; html+=manualCard(a); }
+  }
+  if(!cal.length && !manual.length) html+=`<div class="section-title">Today's jobs</div><div class="job"><span class="meta">No jobs found for today. If you're starting one, use "Start an unscheduled job" above.</span></div>`;
   box.innerHTML=html;
 }
 

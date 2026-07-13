@@ -2,4 +2,9 @@ node_modules/
 crew.db
 crew.db-wal
 crew.db-shm
+uploads/
+logs/
+bin/
+.DS_Store
+.claude/
 *.log
