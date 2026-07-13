@@ -4,92 +4,84 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#0b1220" />
-<title>Crew Clock</title>
+<title>Premier Cleaning</title>
 <style>
-  :root {
-    --bg: #0b1220; --card: #131c2e; --card2: #1b2740;
-    --text: #eaf0fb; --muted: #93a2bf; --line: #26324b;
-    --blue: #2f6bff; --green: #16c07a; --amber: #f4a723; --red: #f0524f;
+  :root{
+    --bg:#0b1220; --card:#131c2e; --card2:#1b2740; --text:#eaf0fb; --muted:#93a2bf;
+    --line:#26324b; --brand:#1f7a4d; --blue:#2f6bff; --green:#16c07a; --amber:#f4a723; --red:#f0524f;
   }
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  body {
-    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: var(--bg); color: var(--text);
-    min-height: 100dvh; padding: env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 16px);
-  }
-  .wrap { max-width: 480px; margin: 0 auto; }
-  header { text-align: center; padding: 22px 0 8px; }
-  header h1 { font-size: 20px; margin: 0; letter-spacing: .3px; }
-  header p { color: var(--muted); margin: 4px 0 0; font-size: 13px; }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  body{margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:var(--bg); color:var(--text); min-height:100dvh;
+    padding: env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 20px);}
+  .wrap{max-width:480px; margin:0 auto;}
+  header{text-align:center; padding:20px 0 6px;}
+  .logo{width:52px;height:52px;border-radius:14px;background:var(--brand);display:inline-grid;place-items:center;font-size:26px;margin-bottom:6px;}
+  header h1{font-size:19px; margin:0; letter-spacing:.3px;}
+  header p{color:var(--muted); margin:4px 0 0; font-size:13px;}
 
-  .btn {
-    display: block; width: 100%; border: 0; border-radius: 16px;
-    padding: 20px; font-size: 20px; font-weight: 700; color: #fff;
-    margin: 12px 0; cursor: pointer; transition: transform .05s ease, filter .15s;
-  }
-  .btn:active { transform: scale(.98); }
-  .btn.blue { background: var(--blue); }
-  .btn.green { background: var(--green); }
-  .btn.amber { background: var(--amber); color: #201400; }
-  .btn.red { background: var(--red); }
-  .btn.ghost { background: var(--card2); color: var(--text); font-size: 16px; font-weight: 600; }
+  .btn{display:block; width:100%; border:0; border-radius:16px; padding:19px; font-size:19px; font-weight:700; color:#fff; margin:12px 0; cursor:pointer; transition:transform .05s;}
+  .btn:active{transform:scale(.98);} .btn:disabled{opacity:.45;}
+  .btn.brand{background:var(--brand);} .btn.blue{background:var(--blue);} .btn.green{background:var(--green);}
+  .btn.amber{background:var(--amber); color:#201400;} .btn.red{background:var(--red);}
+  .btn.ghost{background:var(--card2); color:var(--text); font-size:16px; font-weight:600;}
 
-  .name-btn {
-    display: flex; align-items: center; gap: 14px; width: 100%;
-    background: var(--card); border: 1px solid var(--line); color: var(--text);
-    border-radius: 16px; padding: 18px; font-size: 19px; font-weight: 600;
-    margin: 10px 0; cursor: pointer; text-align: left;
-  }
-  .name-btn:active { background: var(--card2); }
-  .avatar {
-    width: 42px; height: 42px; border-radius: 50%; flex: 0 0 auto;
-    display: grid; place-items: center; font-weight: 700; color: #fff; font-size: 17px;
-    background: var(--blue);
-  }
+  .name-btn{display:flex; align-items:center; gap:14px; width:100%; background:var(--card); border:1px solid var(--line); color:var(--text); border-radius:16px; padding:18px; font-size:19px; font-weight:600; margin:10px 0; cursor:pointer; text-align:left;}
+  .name-btn:active{background:var(--card2);}
+  .avatar{width:42px;height:42px;border-radius:50%;flex:0 0 auto;display:grid;place-items:center;font-weight:700;color:#fff;font-size:17px;background:var(--brand);}
 
-  .status-card {
-    background: var(--card); border: 1px solid var(--line); border-radius: 20px;
-    padding: 24px 20px; text-align: center; margin-top: 12px;
-  }
-  .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; margin-right: 8px; vertical-align: middle; }
-  .status-label { font-size: 15px; color: var(--muted); }
-  .status-big { font-size: 26px; font-weight: 800; margin-top: 4px; }
-  .countdown {
-    font-size: 56px; font-weight: 800; margin: 10px 0 2px; font-variant-numeric: tabular-nums;
-    letter-spacing: 1px;
-  }
-  .countdown.warn { color: var(--amber); }
-  .countdown.over { color: var(--red); }
-  .sub { color: var(--muted); font-size: 14px; }
+  .status-card{background:var(--card); border:1px solid var(--line); border-radius:20px; padding:22px 20px; text-align:center; margin-top:12px;}
+  .dot{width:12px;height:12px;border-radius:50%;display:inline-block;margin-right:8px;vertical-align:middle;}
+  .status-label{font-size:15px;color:var(--muted);} .status-big{font-size:25px;font-weight:800;margin-top:4px;}
+  .countdown{font-size:54px;font-weight:800;margin:8px 0 2px;font-variant-numeric:tabular-nums;letter-spacing:1px;}
+  .countdown.warn{color:var(--amber);} .countdown.over{color:var(--red);}
+  .sub{color:var(--muted); font-size:14px;}
 
-  .stats { display: flex; gap: 10px; margin-top: 16px; }
-  .stat { flex: 1; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 8px; text-align: center; }
-  .stat b { display: block; font-size: 22px; }
-  .stat span { color: var(--muted); font-size: 12px; }
-  .stat.bad b { color: var(--red); }
+  .stats{display:flex; gap:10px; margin-top:16px;}
+  .stat{flex:1; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:13px 6px; text-align:center;}
+  .stat b{display:block; font-size:21px;} .stat span{color:var(--muted); font-size:12px;}
+  .stat.bad b{color:var(--red);}
 
-  .back { background: none; border: 0; color: var(--muted); font-size: 15px; padding: 10px 0; cursor: pointer; }
-  .hidden { display: none; }
-  .warnbox { background: rgba(240,82,79,.12); border: 1px solid rgba(240,82,79,.4); color: #ffb4b2; border-radius: 12px; padding: 12px; font-size: 14px; margin-top: 12px; }
-  .foot { text-align: center; color: var(--muted); font-size: 12px; margin-top: 26px; }
-  a.adminlink { color: var(--muted); }
+  .section-title{font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; margin:22px 4px 8px;}
+  .job{background:var(--card); border:1px solid var(--line); border-radius:16px; padding:15px; margin:10px 0;}
+  .job.active{border-color:var(--brand); box-shadow:0 0 0 1px var(--brand);}
+  .job h3{margin:0 0 3px; font-size:17px;}
+  .job .addr{color:var(--blue); font-size:14px; text-decoration:none; display:inline-block; margin-top:2px;}
+  .job .meta{color:var(--muted); font-size:13px; margin-top:4px;}
+  .badge{font-size:11px; font-weight:700; padding:3px 9px; border-radius:999px; float:right;}
+  .b-assigned{background:var(--card2); color:var(--muted);} .b-progress{background:rgba(47,107,255,.2); color:#9dbcff;}
+  .b-done{background:rgba(22,192,122,.2); color:#7fe6b8;}
+
+  .check{display:flex; align-items:center; gap:12px; padding:11px 4px; border-bottom:1px solid var(--line); cursor:pointer;}
+  .check:last-child{border-bottom:0;}
+  .box{width:26px;height:26px;border-radius:8px;border:2px solid var(--line);flex:0 0 auto;display:grid;place-items:center;font-size:16px;}
+  .check.on .box{background:var(--green); border-color:var(--green);}
+  .check.on span{color:var(--muted); text-decoration:line-through;}
+  .photos{display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;}
+  .photos img{width:64px;height:64px;object-fit:cover;border-radius:10px;border:1px solid var(--line);}
+
+  .announce{background:linear-gradient(135deg,#2a1e08,#3a2a0a); border:1px solid var(--amber); border-radius:14px; padding:14px; margin-top:12px;}
+  .announce .msg{font-size:15px; line-height:1.4;} .announce b{color:var(--amber);}
+  .warnbox{background:rgba(240,82,79,.12); border:1px solid rgba(240,82,79,.4); color:#ffb4b2; border-radius:12px; padding:12px; font-size:14px; margin-top:12px;}
+  .back{background:none; border:0; color:var(--muted); font-size:15px; padding:10px 0; cursor:pointer;}
+  .hidden{display:none;} .foot{text-align:center; color:var(--muted); font-size:12px; margin-top:26px;} a.adminlink{color:var(--muted);}
+  .toast{position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#0b1220; border:1px solid var(--line); color:var(--text); padding:12px 18px; border-radius:12px; font-size:14px; box-shadow:0 8px 30px rgba(0,0,0,.5); z-index:50; max-width:90%;}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <h1>🧽 Crew Clock</h1>
+    <div class="logo">🧽</div>
+    <h1 id="bizName">Premier Cleaning</h1>
     <p id="tagline">Tap your name to start</p>
   </header>
 
-  <!-- Screen 1: pick your name -->
-  <div id="pick">
-    <div id="workerList"></div>
-  </div>
+  <div id="pick"><div id="workerList"></div></div>
 
-  <!-- Screen 2: your day -->
   <div id="me" class="hidden">
     <button class="back" onclick="goBack()">‹ Not you? Switch worker</button>
+
+    <div id="announce"></div>
 
     <div class="status-card">
       <div class="status-label"><span class="dot" id="dot"></span><span id="stateLabel">—</span></div>
@@ -98,12 +90,12 @@
         <div class="countdown" id="countdown">30:00</div>
         <div class="sub">to reach & start your next job</div>
       </div>
-      <div id="lateBox" class="warnbox hidden">
-        ⚠️ You went over the travel window. A 1-hour penalty has been logged. Start your next job now.
-      </div>
+      <div id="lateBox" class="warnbox hidden">⚠️ You went over the travel window. A penalty has been logged. Start your next job now.</div>
     </div>
 
     <div id="actions"></div>
+    <div id="currentJob"></div>
+    <div id="jobList"></div>
 
     <div class="stats">
       <div class="stat"><b id="sJobs">0</b><span>jobs today</span></div>
@@ -112,121 +104,183 @@
     </div>
   </div>
 
-  <div class="foot">
-    <a class="adminlink" href="/admin">Owner dashboard →</a>
-  </div>
+  <div class="foot"><a class="adminlink" href="/admin">Owner dashboard →</a></div>
 </div>
+<input type="file" id="photoInput" accept="image/*" capture="environment" class="hidden" />
 
 <script>
-const $ = (id) => document.getElementById(id);
-let me = null;         // {id, name}
-let poll = null;       // polling interval
-let tick = null;       // 1s countdown interval
-let deadline = null;   // ms
-let skew = 0;          // serverNow - clientNow
+const $ = (id)=>document.getElementById(id);
+let me=null, poll=null, tick=null, deadline=null, skew=0, lastData=null;
+const initials=(n)=>n.split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase();
 
-function initials(name){ return name.split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase(); }
+function toast(msg){ const t=document.createElement('div'); t.className='toast'; t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t.remove(),2600); }
+
+// Best-effort GPS (never blocks the action).
+function getGPS(){
+  return new Promise((resolve)=>{
+    if(!navigator.geolocation) return resolve({});
+    navigator.geolocation.getCurrentPosition(
+      p=>resolve({lat:p.coords.latitude, lng:p.coords.longitude, acc:p.coords.accuracy}),
+      ()=>resolve({}), {enableHighAccuracy:true, timeout:6000, maximumAge:30000});
+  });
+}
+
+async function boot(){
+  const cfg = await fetch('/api/config').then(r=>r.json()).catch(()=>({}));
+  if(cfg.businessName){ $('bizName').textContent=cfg.businessName; document.title=cfg.businessName; }
+  if(cfg.brandColor) document.documentElement.style.setProperty('--brand', cfg.brandColor);
+  await loadWorkers();
+  const saved = localStorage.getItem('crew_worker');
+  if(saved){ try{ selectWorker(JSON.parse(saved)); }catch(e){} }
+}
 
 async function loadWorkers(){
   const list = await fetch('/api/workers').then(r=>r.json());
-  const box = $('workerList');
-  if(!list.length){ box.innerHTML = '<p style="text-align:center;color:var(--muted)">No workers yet. The owner adds them in the dashboard.</p>'; return; }
-  box.innerHTML = '';
-  for(const w of list){
-    const b = document.createElement('button');
-    b.className = 'name-btn';
-    b.innerHTML = `<span class="avatar">${initials(w.name)}</span><span>${w.name}</span>`;
-    b.onclick = () => selectWorker(w);
-    box.appendChild(b);
-  }
+  const box=$('workerList');
+  if(!list.length){ box.innerHTML='<p style="text-align:center;color:var(--muted)">No workers yet. Your manager will add you.</p>'; return; }
+  box.innerHTML='';
+  for(const w of list){ const b=document.createElement('button'); b.className='name-btn'; b.innerHTML=`<span class="avatar">${initials(w.name)}</span><span>${w.name}</span>`; b.onclick=()=>selectWorker(w); box.appendChild(b); }
 }
 
 function selectWorker(w){
-  me = w;
-  localStorage.setItem('crew_worker', JSON.stringify(w));
-  $('pick').classList.add('hidden');
-  $('tagline').textContent = w.name;
-  $('me').classList.remove('hidden');
-  refresh();
-  clearInterval(poll); poll = setInterval(refresh, 15000);
+  me=w; localStorage.setItem('crew_worker', JSON.stringify(w));
+  $('pick').classList.add('hidden'); $('tagline').textContent=w.name; $('me').classList.remove('hidden');
+  refresh(); clearInterval(poll); poll=setInterval(refresh, 15000);
 }
+function goBack(){ localStorage.removeItem('crew_worker'); me=null; clearInterval(poll); clearInterval(tick); $('me').classList.add('hidden'); $('pick').classList.remove('hidden'); $('tagline').textContent='Tap your name to start'; loadWorkers(); }
 
-function goBack(){
-  localStorage.removeItem('crew_worker');
-  me = null; clearInterval(poll); clearInterval(tick);
-  $('me').classList.add('hidden');
-  $('pick').classList.remove('hidden');
-  $('tagline').textContent = 'Tap your name to start';
-  loadWorkers();
-}
-
-async function act(path, body){
-  await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+async function act(path, extra){
+  const gps = await getGPS();
+  await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({workerId:me.id, ...gps, ...(extra||{})})})
+    .then(async r=>{ if(!r.ok){ const e=await r.json().catch(()=>({})); if(e.reason) toast(e.reason); } });
   await refresh();
 }
 
 const STATES = {
-  off:       {label:'Not working',  big:'Clocked out',  color:'#93a2bf'},
-  idle:      {label:'On shift',     big:'Ready — start a job', color:'#2f6bff'},
-  working:   {label:'On the job',   big:'Working',      color:'#16c07a'},
-  traveling: {label:'Travelling',   big:'Head to next job', color:'#f4a723'},
-  late:      {label:'Overdue',      big:'You are late', color:'#f0524f'},
+  off:{label:'Not working', big:'Clocked out', color:'#93a2bf'},
+  idle:{label:'On shift', big:'Ready — start your next job', color:'#2f6bff'},
+  working:{label:'On the job', big:'Working', color:'#16c07a'},
+  traveling:{label:'Travelling', big:'Head to your next job', color:'#f4a723'},
+  late:{label:'Overdue', big:'You are late', color:'#f0524f'},
 };
 
 async function refresh(){
   if(!me) return;
-  const d = await fetch('/api/me/'+me.id).then(r=>r.json());
+  const d = await fetch('/api/me/'+me.id).then(r=>r.json()); lastData=d;
   skew = d.serverNow - Date.now();
-  const s = STATES[d.state] || STATES.off;
-  $('dot').style.background = s.color;
-  $('stateLabel').textContent = s.label;
-  $('stateBig').textContent = s.big;
+  const s = STATES[d.state]||STATES.off;
+  $('dot').style.background=s.color; $('stateLabel').textContent=s.label; $('stateBig').textContent=s.big;
 
-  // countdown
   deadline = d.deadline;
-  $('timerBox').classList.toggle('hidden', d.state !== 'traveling');
-  $('lateBox').classList.toggle('hidden', d.state !== 'late');
+  $('timerBox').classList.toggle('hidden', d.state!=='traveling');
+  $('lateBox').classList.toggle('hidden', d.state!=='late');
   clearInterval(tick);
-  if(d.state === 'traveling'){ renderCountdown(); tick = setInterval(renderCountdown, 1000); }
+  if(d.state==='traveling'){ renderCountdown(); tick=setInterval(renderCountdown,1000); }
 
-  // stats
-  $('sJobs').textContent = d.summary.jobsDone;
-  $('sHours').textContent = (d.summary.workedMinutes/60).toFixed(1).replace('.0','')+'h';
-  $('sPen').textContent = d.summary.penalties;
-  $('sPenWrap').classList.toggle('bad', d.summary.penalties>0);
+  $('sJobs').textContent=d.summary.jobsDone;
+  $('sHours').textContent=(d.summary.workedMinutes/60).toFixed(1).replace('.0','')+'h';
+  $('sPen').textContent=d.summary.penalties; $('sPenWrap').classList.toggle('bad', d.summary.penalties>0);
 
-  // actions
-  renderActions(d.state);
+  renderAnnounce(d.announcement);
+  renderActions(d);
+  renderCurrentJob(d);
+  renderJobList(d);
 }
 
 function renderCountdown(){
-  if(deadline == null) return;
-  const now = Date.now() + skew;
-  let left = Math.round((deadline - now)/1000);
-  const el = $('countdown');
-  el.classList.remove('warn','over');
-  if(left <= 0){ el.textContent='00:00'; el.classList.add('over'); refresh(); return; }
-  if(left <= 300) el.classList.add('warn');
-  const m = Math.floor(left/60), sec = left%60;
-  el.textContent = `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+  if(deadline==null) return;
+  let left=Math.round((deadline-(Date.now()+skew))/1000);
+  const el=$('countdown'); el.classList.remove('warn','over');
+  if(left<=0){ el.textContent='00:00'; el.classList.add('over'); refresh(); return; }
+  if(left<=300) el.classList.add('warn');
+  el.textContent=`${String(Math.floor(left/60)).padStart(2,'0')}:${String(left%60).padStart(2,'0')}`;
 }
 
-function renderActions(state){
-  const box = $('actions'); box.innerHTML='';
-  const add = (label, cls, fn) => { const b=document.createElement('button'); b.className='btn '+cls; b.textContent=label; b.onclick=fn; box.appendChild(b); };
-  if(state==='off'){ add('🟢  Clock In', 'blue', ()=>act('/api/clock-in',{workerId:me.id})); return; }
-  if(state==='idle'){ add('▶️  Start Job', 'green', ()=>act('/api/start-job',{workerId:me.id})); }
-  if(state==='working'){ add('✅  Finished — Mark Done', 'amber', ()=>act('/api/finish-job',{workerId:me.id})); }
-  if(state==='traveling' || state==='late'){ add('📍  Arrived — Start Next Job', 'green', ()=>act('/api/start-job',{workerId:me.id})); }
-  // clock out is always available while on shift
-  add('⏹  Clock Out (end of day)', 'ghost', ()=>{ if(confirm('Clock out for the day?')) act('/api/clock-out',{workerId:me.id}); });
+function renderAnnounce(a){
+  const box=$('announce');
+  if(!a || a.read){ box.innerHTML=''; return; }
+  box.innerHTML=`<div class="announce"><div class="msg"><b>📢 Message from manager</b><br>${escapeHtml(a.message)}</div>
+    <button class="btn ghost" style="margin:12px 0 0" onclick="readAnn(${a.id})">Got it 👍</button></div>`;
+}
+async function readAnn(id){ await fetch('/api/announcement/'+id+'/read',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workerId:me.id})}); refresh(); }
+
+function renderActions(d){
+  const box=$('actions'); box.innerHTML='';
+  const add=(label,cls,fn)=>{ const b=document.createElement('button'); b.className='btn '+cls; b.textContent=label; b.onclick=fn; box.appendChild(b); };
+  if(d.state==='off'){ add('🟢  Clock In','brand',()=>act('/api/clock-in')); return; }
+  if((d.state==='idle'||d.state==='traveling'||d.state==='late')){
+    const next=(d.assignments||[]).find(a=>a.status!=='done');
+    if(next) add((d.state==='idle'?'▶️  Start: ':'📍  Arrived — Start: ')+next.title,'green',()=>act('/api/start-job',{assignmentId:next.id}));
+    else add('▶️  Start Unscheduled Job','green',()=>act('/api/start-job'));
+  }
+  add('⏹  Clock Out (end of day)','ghost',()=>{ if(confirm('Clock out for the day?')) act('/api/clock-out'); });
 }
 
-// restore last worker on this phone
-loadWorkers().then(()=>{
-  const saved = localStorage.getItem('crew_worker');
-  if(saved){ try{ selectWorker(JSON.parse(saved)); }catch(e){} }
+function renderCurrentJob(d){
+  const box=$('currentJob');
+  if(d.state!=='working'){ box.innerHTML=''; return; }
+  const a=d.currentAssignment;
+  if(!a){ box.innerHTML=`<div class="job active"><h3>Unscheduled job</h3><button class="btn amber" style="margin-top:12px" onclick="act('/api/finish-job')">✅ Finished — Mark Done</button></div>`; return; }
+  const doneCount=a.checklist.filter(c=>c.done).length;
+  let html=`<div class="section-title">Current job</div><div class="job active"><h3>${escapeHtml(a.title)}</h3>`;
+  if(a.address) html+=`<a class="addr" href="https://maps.google.com/?q=${encodeURIComponent(a.address)}" target="_blank">📍 ${escapeHtml(a.address)}</a>`;
+  if(a.notes) html+=`<div class="meta">📝 ${escapeHtml(a.notes)}</div>`;
+  if(a.checklist.length){
+    html+=`<div class="section-title" style="margin-top:14px">Checklist (${doneCount}/${a.checklist.length})</div>`;
+    for(const c of a.checklist) html+=`<div class="check ${c.done?'on':''}" onclick="toggleCheck(${c.id},${c.done?0:1})"><div class="box">${c.done?'✓':''}</div><span>${escapeHtml(c.text)}</span></div>`;
+  }
+  html+=`<div class="section-title" style="margin-top:14px">Photo proof${d.requirePhoto?' (required)':''}</div>`;
+  html+=`<div class="photos">`;
+  for(const p of a.photos) html+=`<img src="${p.url}">`;
+  html+=`<button class="btn ghost" style="width:auto;margin:0;padding:12px 16px" onclick="takePhoto(${a.id})">📷 Add photo</button></div>`;
+  html+=`<button class="btn amber" style="margin-top:16px" onclick="act('/api/finish-job')">✅ Finished — Mark Done</button>`;
+  html+=`</div>`;
+  box.innerHTML=html;
+}
+
+function renderJobList(d){
+  const box=$('jobList');
+  if(d.state==='off'){ box.innerHTML=''; return; }
+  const list=(d.assignments||[]);
+  if(!list.length){ box.innerHTML=`<div class="section-title">Today's jobs</div><div class="job"><span class="meta">No jobs scheduled for you today. Use the button above for an unscheduled job.</span></div>`; return; }
+  let html=`<div class="section-title">Today's jobs (${list.filter(a=>a.status==='done').length}/${list.length} done)</div>`;
+  for(const a of list){
+    if(d.state==='working' && d.currentAssignment && d.currentAssignment.id===a.id) continue;
+    const badge=a.status==='done'?'<span class="badge b-done">Done ✓</span>':a.status==='in_progress'?'<span class="badge b-progress">In progress</span>':'<span class="badge b-assigned">To do</span>';
+    html+=`<div class="job">${badge}<h3>${escapeHtml(a.title)}</h3>`;
+    if(a.address) html+=`<a class="addr" href="https://maps.google.com/?q=${encodeURIComponent(a.address)}" target="_blank">📍 ${escapeHtml(a.address)}</a>`;
+    if(a.scheduledAt) html+=`<div class="meta">🕒 ${new Date(a.scheduledAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</div>`;
+    if(a.checklist.length) html+=`<div class="meta">☑️ ${a.checklist.length} checklist items</div>`;
+    html+=`</div>`;
+  }
+  box.innerHTML=html;
+}
+
+async function toggleCheck(id, done){ await fetch('/api/checklist/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({done})}); refresh(); }
+
+let photoAssignment=null;
+function takePhoto(assignmentId){ photoAssignment=assignmentId; $('photoInput').click(); }
+$('photoInput').addEventListener('change', async (e)=>{
+  const file=e.target.files[0]; e.target.value='';
+  if(!file) return;
+  toast('Uploading photo…');
+  const dataUrl = await resizeImage(file, 1200, 0.7);
+  const gps = await getGPS();
+  await fetch('/api/photo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workerId:me.id, assignmentId:photoAssignment, dataUrl, ...gps})});
+  refresh();
 });
+function resizeImage(file, maxDim, quality){
+  return new Promise((resolve)=>{
+    const img=new Image(); const url=URL.createObjectURL(file);
+    img.onload=()=>{ let{width:w,height:h}=img; if(w>h && w>maxDim){h=h*maxDim/w; w=maxDim;} else if(h>maxDim){w=w*maxDim/h; h=maxDim;}
+      const c=document.createElement('canvas'); c.width=w; c.height=h; c.getContext('2d').drawImage(img,0,0,w,h);
+      URL.revokeObjectURL(url); resolve(c.toDataURL('image/jpeg', quality)); };
+    img.src=url;
+  });
+}
+function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+boot();
 </script>
 </body>
 </html>

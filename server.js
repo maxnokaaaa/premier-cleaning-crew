@@ -1,152 +1,120 @@
-// Crew Clock — server.
-// Serves the worker phone app (/) and the owner dashboard (/admin),
-// plus a small JSON API. Runs a once-a-minute sweep that auto-logs a
-// penalty when a worker misses their travel window.
+// Premier Cleaning — Crew Clock server.
+// Worker phone app (/) + owner dashboard (/admin) + JSON API.
+// Features: clock in/out, 30-min travel leash with auto penalties, GPS proof,
+// job scheduling, per-job checklists + photo proof, payroll, announcements.
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 const express = require('express');
 const { db } = require('./db');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '20mb' })); // room for base64 photos
+
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+app.use('/uploads', express.static(UPLOAD_DIR));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_PIN = process.env.ADMIN_PIN || '1234'; // change this in the cloud!
+const ADMIN_PIN = process.env.ADMIN_PIN || '1234';
 
-// ---------- helpers ----------
-const getSetting = (key) =>
-  db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value;
+// ---------- settings helpers ----------
+const getSetting = (k) => db.prepare('SELECT value FROM settings WHERE key = ?').get(k)?.value;
 const setSetting = db.prepare(
-  'INSERT INTO settings (key, value) VALUES (?, ?) ' +
-    'ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
 );
 const travelMs = () => Number(getSetting('travel_minutes')) * 60 * 1000;
 const penaltyHours = () => Number(getSetting('penalty_hours'));
+const brand = () => ({ businessName: getSetting('business_name'), brandColor: getSetting('brand_color') });
 
-const startOfToday = () => {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-};
+const startOfToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
-// Statements reused a lot.
-const openShiftFor = db.prepare(
-  'SELECT * FROM shifts WHERE worker_id = ? AND clock_out IS NULL ORDER BY clock_in DESC LIMIT 1'
-);
-const openJobFor = db.prepare(
-  'SELECT * FROM jobs WHERE worker_id = ? AND finished_at IS NULL ORDER BY started_at DESC LIMIT 1'
-);
-const lastFinishedJobFor = db.prepare(
-  'SELECT * FROM jobs WHERE worker_id = ? AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1'
-);
+// ---------- reusable statements ----------
+const openShiftFor = db.prepare('SELECT * FROM shifts WHERE worker_id = ? AND clock_out IS NULL ORDER BY clock_in DESC LIMIT 1');
+const openJobFor = db.prepare('SELECT * FROM jobs WHERE worker_id = ? AND finished_at IS NULL ORDER BY started_at DESC LIMIT 1');
+const lastFinishedJobFor = db.prepare('SELECT * FROM jobs WHERE worker_id = ? AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1');
 
-// Work out what a worker is doing right now.
-// States: off | idle | working | traveling | late
+function recordLocation(workerId, body, context) {
+  const { lat, lng, acc } = body || {};
+  if (typeof lat === 'number' && typeof lng === 'number') {
+    db.prepare('INSERT INTO locations (worker_id, lat, lng, accuracy, context, created_at) VALUES (?,?,?,?,?,?)')
+      .run(workerId, lat, lng, acc ?? null, context, Date.now());
+  }
+}
+const latestLocation = db.prepare('SELECT lat, lng, accuracy, context, created_at FROM locations WHERE worker_id = ? ORDER BY created_at DESC LIMIT 1');
+
+// worker state: off | idle | working | traveling | late
 function computeState(workerId) {
   const shift = openShiftFor.get(workerId);
   if (!shift) return { state: 'off', shift: null, job: null, deadline: null };
-
   const job = openJobFor.get(workerId);
   if (job) return { state: 'working', shift, job, deadline: null };
-
-  // Clocked in but no open job: either idle or traveling to the next job.
   const last = lastFinishedJobFor.get(workerId);
   if (last && last.travel_deadline && last.finished_at >= shift.clock_in) {
-    const now = Date.now();
-    if (now <= last.travel_deadline) {
-      return { state: 'traveling', shift, job: last, deadline: last.travel_deadline };
-    }
-    // Past the window. Was a penalty already recorded for this job?
-    const pen = db
-      .prepare('SELECT id FROM penalties WHERE job_id = ?')
-      .get(last.id);
-    if (pen) return { state: 'late', shift, job: last, deadline: last.travel_deadline };
-    // No penalty logged yet (sweep may not have run) — treat as late.
+    if (Date.now() <= last.travel_deadline) return { state: 'traveling', shift, job: last, deadline: last.travel_deadline };
     return { state: 'late', shift, job: last, deadline: last.travel_deadline };
   }
   return { state: 'idle', shift, job: null, deadline: null };
 }
 
-// Today's summary numbers for one worker.
 function todaySummary(workerId) {
   const from = startOfToday();
-  const jobsDone = db
-    .prepare(
-      'SELECT COUNT(*) AS n FROM jobs WHERE worker_id = ? AND finished_at IS NOT NULL AND finished_at >= ?'
-    )
-    .get(workerId, from).n;
-
-  const penRows = db
-    .prepare(
-      'SELECT hours_docked, waived FROM penalties WHERE worker_id = ? AND created_at >= ?'
-    )
-    .all(workerId, from);
+  const jobsDone = db.prepare('SELECT COUNT(*) AS n FROM jobs WHERE worker_id = ? AND finished_at IS NOT NULL AND finished_at >= ?').get(workerId, from).n;
+  const penRows = db.prepare('SELECT hours_docked, waived FROM penalties WHERE worker_id = ? AND created_at >= ?').all(workerId, from);
   const penalties = penRows.filter((p) => !p.waived).length;
-  const hoursDocked = penRows
-    .filter((p) => !p.waived)
-    .reduce((s, p) => s + p.hours_docked, 0);
-
-  // Worked minutes today across shifts (open shift counts up to now).
-  const shifts = db
-    .prepare('SELECT clock_in, clock_out FROM shifts WHERE worker_id = ? AND clock_in >= ?')
-    .all(workerId, from);
+  const hoursDocked = penRows.filter((p) => !p.waived).reduce((s, p) => s + p.hours_docked, 0);
+  const shifts = db.prepare('SELECT clock_in, clock_out FROM shifts WHERE worker_id = ? AND clock_in >= ?').all(workerId, from);
   let workedMs = 0;
   for (const s of shifts) workedMs += (s.clock_out || Date.now()) - s.clock_in;
-
   return { jobsDone, penalties, hoursDocked, workedMinutes: Math.round(workedMs / 60000) };
 }
 
-// The sweep: catch anyone who ran out of travel time and hasn't been penalised.
+// Assignment + its checklist + photo count, for a worker's day.
+function assignmentDetail(a) {
+  const checklist = db.prepare('SELECT id, text, done FROM checklist_items WHERE assignment_id = ? ORDER BY sort_order, id').all(a.id);
+  const photos = db.prepare('SELECT id, filename, created_at FROM photos WHERE assignment_id = ? ORDER BY created_at').all(a.id);
+  return {
+    id: a.id, title: a.title, address: a.address, notes: a.notes,
+    scheduledAt: a.scheduled_at, status: a.status,
+    checklist, photos: photos.map((p) => ({ id: p.id, url: `/uploads/${p.filename}`, at: p.created_at })),
+    photoCount: photos.length,
+  };
+}
+function todaysAssignments(workerId) {
+  const rows = db.prepare('SELECT * FROM assignments WHERE worker_id = ? AND date = ? ORDER BY sort_order, scheduled_at, id').all(workerId, todayStr());
+  return rows.map(assignmentDetail);
+}
+
+// ---------- travel-window sweep (auto penalties) ----------
 function sweep() {
   const now = Date.now();
-  const candidates = db
-    .prepare(
-      `SELECT j.* FROM jobs j
-       WHERE j.finished_at IS NOT NULL
-         AND j.travel_deadline IS NOT NULL
-         AND j.travel_deadline < ?
-         AND NOT EXISTS (SELECT 1 FROM penalties p WHERE p.job_id = j.id)`
-    )
-    .all(now);
-
+  const candidates = db.prepare(
+    `SELECT j.* FROM jobs j WHERE j.finished_at IS NOT NULL AND j.travel_deadline IS NOT NULL
+       AND j.travel_deadline < ? AND NOT EXISTS (SELECT 1 FROM penalties p WHERE p.job_id = j.id)`
+  ).all(now);
   const insertPenalty = db.prepare(
-    `INSERT INTO penalties (worker_id, job_id, created_at, minutes_late, hours_docked, reason, waived)
-     VALUES (?, ?, ?, ?, ?, ?, 0)`
+    `INSERT INTO penalties (worker_id, job_id, created_at, minutes_late, hours_docked, reason, waived) VALUES (?,?,?,?,?,?,0)`
   );
-
   for (const job of candidates) {
-    // Did they start another job after this one finished? Then they were on time.
-    const nextJob = db
-      .prepare(
-        'SELECT id FROM jobs WHERE worker_id = ? AND started_at > ? ORDER BY started_at ASC LIMIT 1'
-      )
-      .get(job.worker_id, job.finished_at);
-    if (nextJob) continue; // moved on in time (they beat the deadline)
-
-    // Did they clock out during the window? Then no penalty (end of day).
+    const nextJob = db.prepare('SELECT id FROM jobs WHERE worker_id = ? AND started_at > ? ORDER BY started_at ASC LIMIT 1').get(job.worker_id, job.finished_at);
+    if (nextJob) continue;
     const shift = db.prepare('SELECT * FROM shifts WHERE id = ?').get(job.shift_id);
     if (shift && shift.clock_out && shift.clock_out <= job.travel_deadline) continue;
-
     const minutesLate = Math.max(1, Math.round((now - job.travel_deadline) / 60000));
-    insertPenalty.run(
-      job.worker_id,
-      job.id,
-      now,
-      minutesLate,
-      penaltyHours(),
-      `Missed the ${Number(getSetting('travel_minutes'))}-minute travel window after finishing a job`
-    );
+    insertPenalty.run(job.worker_id, job.id, now, minutesLate, penaltyHours(),
+      `Missed the ${Number(getSetting('travel_minutes'))}-minute travel window after finishing a job`);
   }
 }
 setInterval(sweep, 60 * 1000);
 sweep();
 
-// ---------- worker API ----------
+// ================= WORKER API =================
+app.get('/api/config', (req, res) => res.json(brand()));
+
 app.get('/api/workers', (req, res) => {
-  const rows = db
-    .prepare('SELECT id, name FROM workers WHERE active = 1 ORDER BY sort_order, name')
-    .all();
-  res.json(rows);
+  res.json(db.prepare('SELECT id, name FROM workers WHERE active = 1 ORDER BY sort_order, name').all());
 });
 
 app.get('/api/me/:id', (req, res) => {
@@ -154,21 +122,37 @@ app.get('/api/me/:id', (req, res) => {
   const worker = db.prepare('SELECT id, name FROM workers WHERE id = ?').get(id);
   if (!worker) return res.status(404).json({ error: 'not found' });
   const st = computeState(id);
+  let currentAssignment = null;
+  if (st.job && st.job.assignment_id) {
+    const a = db.prepare('SELECT * FROM assignments WHERE id = ?').get(st.job.assignment_id);
+    if (a) currentAssignment = assignmentDetail(a);
+  }
+  // latest active announcement + whether this worker has read it
+  const ann = db.prepare('SELECT * FROM announcements WHERE active = 1 ORDER BY created_at DESC LIMIT 1').get();
+  let announcement = null;
+  if (ann) {
+    const read = db.prepare('SELECT 1 FROM announcement_reads WHERE announcement_id = ? AND worker_id = ?').get(ann.id, id);
+    announcement = { id: ann.id, message: ann.message, at: ann.created_at, read: !!read };
+  }
   res.json({
-    worker,
-    state: st.state,
-    deadline: st.deadline,
-    currentJob: st.job ? { id: st.job.id, name: st.job.name, startedAt: st.job.started_at } : null,
+    worker, state: st.state, deadline: st.deadline,
+    currentJob: st.job ? { id: st.job.id, name: st.job.name, startedAt: st.job.started_at, assignmentId: st.job.assignment_id } : null,
+    currentAssignment,
+    assignments: todaysAssignments(id),
+    announcement,
     travelMinutes: Number(getSetting('travel_minutes')),
+    requirePhoto: getSetting('require_photo') === '1',
+    requireChecklist: getSetting('require_checklist') === '1',
     summary: todaySummary(id),
+    ...brand(),
     serverNow: Date.now(),
   });
 });
 
 app.post('/api/clock-in', (req, res) => {
   const id = Number(req.body.workerId);
-  if (openShiftFor.get(id)) return res.json({ ok: true }); // already in
-  db.prepare('INSERT INTO shifts (worker_id, clock_in) VALUES (?, ?)').run(id, Date.now());
+  if (!openShiftFor.get(id)) db.prepare('INSERT INTO shifts (worker_id, clock_in) VALUES (?, ?)').run(id, Date.now());
+  recordLocation(id, req.body, 'clock_in');
   res.json({ ok: true });
 });
 
@@ -176,11 +160,17 @@ app.post('/api/start-job', (req, res) => {
   const id = Number(req.body.workerId);
   const shift = openShiftFor.get(id);
   if (!shift) return res.status(400).json({ error: 'not clocked in' });
-  if (openJobFor.get(id)) return res.json({ ok: true }); // already on a job
-  const name = (req.body.name || '').toString().slice(0, 80) || null;
-  db.prepare(
-    'INSERT INTO jobs (worker_id, shift_id, name, started_at) VALUES (?, ?, ?, ?)'
-  ).run(id, shift.id, name, Date.now());
+  if (openJobFor.get(id)) return res.json({ ok: true });
+  const assignmentId = req.body.assignmentId ? Number(req.body.assignmentId) : null;
+  let name = (req.body.name || '').toString().slice(0, 80) || null;
+  if (assignmentId) {
+    const a = db.prepare('SELECT * FROM assignments WHERE id = ? AND worker_id = ?').get(assignmentId, id);
+    if (a) name = a.title;
+  }
+  const info = db.prepare('INSERT INTO jobs (worker_id, shift_id, name, started_at, assignment_id) VALUES (?,?,?,?,?)')
+    .run(id, shift.id, name, Date.now(), assignmentId);
+  if (assignmentId) db.prepare("UPDATE assignments SET status='in_progress', job_id=? WHERE id=?").run(info.lastInsertRowid, assignmentId);
+  recordLocation(id, req.body, 'start_job');
   res.json({ ok: true });
 });
 
@@ -188,12 +178,21 @@ app.post('/api/finish-job', (req, res) => {
   const id = Number(req.body.workerId);
   const job = openJobFor.get(id);
   if (!job) return res.status(400).json({ error: 'no active job' });
+  // Enforce checklist + photo for scheduled jobs.
+  if (job.assignment_id) {
+    if (getSetting('require_checklist') === '1') {
+      const remaining = db.prepare('SELECT COUNT(*) AS n FROM checklist_items WHERE assignment_id = ? AND done = 0').get(job.assignment_id).n;
+      if (remaining > 0) return res.status(400).json({ error: 'checklist', reason: `Tick off all ${remaining} remaining checklist item(s) first.` });
+    }
+    if (getSetting('require_photo') === '1') {
+      const photos = db.prepare('SELECT COUNT(*) AS n FROM photos WHERE assignment_id = ?').get(job.assignment_id).n;
+      if (photos === 0) return res.status(400).json({ error: 'photo', reason: 'Add at least one photo of the finished job first.' });
+    }
+  }
   const now = Date.now();
-  db.prepare('UPDATE jobs SET finished_at = ?, travel_deadline = ? WHERE id = ?').run(
-    now,
-    now + travelMs(),
-    job.id
-  );
+  db.prepare('UPDATE jobs SET finished_at = ?, travel_deadline = ? WHERE id = ?').run(now, now + travelMs(), job.id);
+  if (job.assignment_id) db.prepare("UPDATE assignments SET status='done' WHERE id=?").run(job.assignment_id);
+  recordLocation(id, req.body, 'finish_job');
   res.json({ ok: true, deadline: now + travelMs() });
 });
 
@@ -202,83 +201,91 @@ app.post('/api/clock-out', (req, res) => {
   const shift = openShiftFor.get(id);
   if (!shift) return res.json({ ok: true });
   const now = Date.now();
-  // Auto-finish any dangling open job (no travel timer — they're going home).
   const job = openJobFor.get(id);
   if (job) db.prepare('UPDATE jobs SET finished_at = ? WHERE id = ?').run(now, job.id);
   db.prepare('UPDATE shifts SET clock_out = ? WHERE id = ?').run(now, shift.id);
+  recordLocation(id, req.body, 'clock_out');
   res.json({ ok: true });
 });
 
-// ---------- admin API ----------
-function requireAdmin(req, res, next) {
-  const pin = req.get('x-admin-pin') || req.query.pin;
-  if (pin !== ADMIN_PIN) return res.status(401).json({ error: 'bad pin' });
-  next();
-}
-
-app.post('/api/admin/login', (req, res) => {
-  res.json({ ok: req.body.pin === ADMIN_PIN });
+app.post('/api/checklist/:itemId', (req, res) => {
+  const done = req.body.done ? 1 : 0;
+  db.prepare('UPDATE checklist_items SET done = ?, done_at = ? WHERE id = ?').run(done, done ? Date.now() : null, Number(req.params.itemId));
+  res.json({ ok: true });
 });
 
+app.post('/api/photo', (req, res) => {
+  const id = Number(req.body.workerId);
+  const assignmentId = req.body.assignmentId ? Number(req.body.assignmentId) : null;
+  const dataUrl = (req.body.dataUrl || '').toString();
+  const m = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/);
+  if (!m) return res.status(400).json({ error: 'bad image' });
+  const ext = m[1] === 'jpeg' ? 'jpg' : m[1];
+  const filename = `${crypto.randomBytes(10).toString('hex')}.${ext}`;
+  fs.writeFileSync(path.join(UPLOAD_DIR, filename), Buffer.from(m[2], 'base64'));
+  db.prepare('INSERT INTO photos (assignment_id, worker_id, filename, lat, lng, created_at) VALUES (?,?,?,?,?,?)')
+    .run(assignmentId, id, filename, req.body.lat ?? null, req.body.lng ?? null, Date.now());
+  recordLocation(id, req.body, 'photo');
+  res.json({ ok: true, url: `/uploads/${filename}` });
+});
+
+app.post('/api/announcement/:id/read', (req, res) => {
+  const annId = Number(req.params.id);
+  const workerId = Number(req.body.workerId);
+  const seen = db.prepare('SELECT 1 FROM announcement_reads WHERE announcement_id = ? AND worker_id = ?').get(annId, workerId);
+  if (!seen) db.prepare('INSERT INTO announcement_reads (announcement_id, worker_id, read_at) VALUES (?,?,?)').run(annId, workerId, Date.now());
+  res.json({ ok: true });
+});
+
+// ================= ADMIN API =================
+function requireAdmin(req, res, next) {
+  if ((req.get('x-admin-pin') || req.query.pin) !== ADMIN_PIN) return res.status(401).json({ error: 'bad pin' });
+  next();
+}
+app.post('/api/admin/login', (req, res) => res.json({ ok: req.body.pin === ADMIN_PIN }));
+
 app.get('/api/admin/overview', requireAdmin, (req, res) => {
-  const workers = db
-    .prepare('SELECT id, name FROM workers WHERE active = 1 ORDER BY sort_order, name')
-    .all();
-  const rate = Number(getSetting('hourly_rate'));
-  const currency = getSetting('currency');
+  const workers = db.prepare('SELECT id, name FROM workers WHERE active = 1 ORDER BY sort_order, name').all();
   const crew = workers.map((w) => {
     const st = computeState(w.id);
-    return { ...w, state: st.state, deadline: st.deadline, summary: todaySummary(w.id) };
+    const loc = latestLocation.get(w.id);
+    const assignments = todaysAssignments(w.id);
+    return {
+      ...w, state: st.state, deadline: st.deadline, summary: todaySummary(w.id),
+      location: loc ? { lat: loc.lat, lng: loc.lng, at: loc.created_at, context: loc.context } : null,
+      jobsScheduled: assignments.length, jobsDoneScheduled: assignments.filter((a) => a.status === 'done').length,
+    };
   });
   res.json({
     crew,
     settings: {
-      travelMinutes: Number(getSetting('travel_minutes')),
-      penaltyHours: penaltyHours(),
-      hourlyRate: rate,
-      currency,
+      travelMinutes: Number(getSetting('travel_minutes')), penaltyHours: penaltyHours(),
+      hourlyRate: Number(getSetting('hourly_rate')), currency: getSetting('currency'),
+      requirePhoto: getSetting('require_photo') === '1', requireChecklist: getSetting('require_checklist') === '1',
+      ...brand(),
     },
     serverNow: Date.now(),
   });
 });
 
 app.get('/api/admin/penalties', requireAdmin, (req, res) => {
-  const rows = db
-    .prepare(
-      `SELECT p.*, w.name AS worker_name FROM penalties p
-       JOIN workers w ON w.id = p.worker_id
-       ORDER BY p.created_at DESC LIMIT 200`
-    )
-    .all();
-  res.json(rows);
+  res.json(db.prepare(
+    `SELECT p.*, w.name AS worker_name FROM penalties p JOIN workers w ON w.id = p.worker_id ORDER BY p.created_at DESC LIMIT 200`
+  ).all());
 });
-
 app.post('/api/admin/penalties/:id/waive', requireAdmin, (req, res) => {
-  const waived = req.body.waived ? 1 : 0;
-  db.prepare('UPDATE penalties SET waived = ? WHERE id = ?').run(waived, Number(req.params.id));
+  db.prepare('UPDATE penalties SET waived = ? WHERE id = ?').run(req.body.waived ? 1 : 0, Number(req.params.id));
   res.json({ ok: true });
 });
 
 app.get('/api/admin/log', requireAdmin, (req, res) => {
   const from = startOfToday();
   const events = [];
-  const shifts = db
-    .prepare(
-      `SELECT s.*, w.name FROM shifts s JOIN workers w ON w.id = s.worker_id
-       WHERE s.clock_in >= ? ORDER BY s.clock_in DESC`
-    )
-    .all(from);
-  for (const s of shifts) {
+  for (const s of db.prepare(`SELECT s.*, w.name FROM shifts s JOIN workers w ON w.id = s.worker_id WHERE s.clock_in >= ?`).all(from)) {
     events.push({ t: s.clock_in, name: s.name, type: 'Clocked in' });
     if (s.clock_out) events.push({ t: s.clock_out, name: s.name, type: 'Clocked out' });
   }
-  const jobs = db
-    .prepare(
-      `SELECT j.*, w.name FROM jobs j JOIN workers w ON w.id = j.worker_id
-       WHERE j.started_at >= ? ORDER BY j.started_at DESC`
-    )
-    .all(from);
-  for (const j of jobs) {
+  for (const j of db.prepare(`SELECT j.*, w.name FROM jobs j JOIN workers w ON w.id = j.worker_id WHERE j.started_at >= ?`).all(from)) {
     events.push({ t: j.started_at, name: j.name, type: 'Started job' + (j.name ? ` (${j.name})` : '') });
     if (j.finished_at) events.push({ t: j.finished_at, name: j.name, type: 'Finished job' });
   }
@@ -290,28 +297,120 @@ app.post('/api/admin/workers', requireAdmin, (req, res) => {
   const name = (req.body.name || '').toString().trim().slice(0, 60);
   if (!name) return res.status(400).json({ error: 'name required' });
   const max = db.prepare('SELECT MAX(sort_order) AS m FROM workers').get().m || 0;
-  db.prepare(
-    'INSERT INTO workers (name, active, sort_order, created_at) VALUES (?, 1, ?, ?)'
-  ).run(name, max + 1, Date.now());
+  db.prepare('INSERT INTO workers (name, active, sort_order, created_at) VALUES (?, 1, ?, ?)').run(name, max + 1, Date.now());
   res.json({ ok: true });
 });
-
 app.post('/api/admin/workers/:id/remove', requireAdmin, (req, res) => {
   db.prepare('UPDATE workers SET active = 0 WHERE id = ?').run(Number(req.params.id));
   res.json({ ok: true });
 });
 
 app.post('/api/admin/settings', requireAdmin, (req, res) => {
-  const allowed = ['travel_minutes', 'penalty_hours', 'hourly_rate', 'currency'];
-  for (const key of allowed) {
-    if (req.body[key] !== undefined) setSetting.run(key, String(req.body[key]));
-  }
+  const allowed = ['travel_minutes', 'penalty_hours', 'hourly_rate', 'currency', 'business_name', 'brand_color', 'require_photo', 'require_checklist'];
+  for (const key of allowed) if (req.body[key] !== undefined) setSetting.run(key, String(req.body[key]));
   res.json({ ok: true });
+});
+
+// ---- scheduling ----
+app.get('/api/admin/assignments', requireAdmin, (req, res) => {
+  const date = (req.query.date || todayStr()).toString();
+  const rows = db.prepare(
+    `SELECT a.*, w.name AS worker_name FROM assignments a JOIN workers w ON w.id = a.worker_id
+     WHERE a.date = ? ORDER BY w.sort_order, a.sort_order, a.scheduled_at, a.id`
+  ).all(date);
+  res.json(rows.map((r) => ({ ...assignmentDetail(r), workerId: r.worker_id, workerName: r.worker_name, date: r.date })));
+});
+
+app.post('/api/admin/assignments', requireAdmin, (req, res) => {
+  const { workerId, title, address, notes, date, time, checklist } = req.body;
+  if (!workerId || !title) return res.status(400).json({ error: 'worker and title required' });
+  const d = (date || todayStr()).toString();
+  let scheduledAt = null;
+  if (time) { const dt = new Date(`${d}T${time}:00`); if (!isNaN(dt)) scheduledAt = dt.getTime(); }
+  const max = db.prepare('SELECT MAX(sort_order) AS m FROM assignments WHERE worker_id = ? AND date = ?').get(Number(workerId), d).m || 0;
+  const info = db.prepare(
+    'INSERT INTO assignments (worker_id, title, address, notes, date, scheduled_at, sort_order, created_at) VALUES (?,?,?,?,?,?,?,?)'
+  ).run(Number(workerId), title.toString().slice(0, 120), (address || '').toString().slice(0, 200) || null, (notes || '').toString().slice(0, 500) || null, d, scheduledAt, max + 1, Date.now());
+  const items = Array.isArray(checklist) ? checklist : (checklist || '').toString().split('\n');
+  let i = 0;
+  for (const raw of items) {
+    const text = raw.toString().trim();
+    if (text) db.prepare('INSERT INTO checklist_items (assignment_id, text, sort_order) VALUES (?,?,?)').run(info.lastInsertRowid, text.slice(0, 120), i++);
+  }
+  res.json({ ok: true, id: info.lastInsertRowid });
+});
+
+app.post('/api/admin/assignments/:id/remove', requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  db.prepare('DELETE FROM checklist_items WHERE assignment_id = ?').run(id);
+  db.prepare('DELETE FROM assignments WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/assignment/:id', requireAdmin, (req, res) => {
+  const a = db.prepare('SELECT a.*, w.name AS worker_name FROM assignments a JOIN workers w ON w.id = a.worker_id WHERE a.id = ?').get(Number(req.params.id));
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const photos = db.prepare('SELECT id, filename, lat, lng, created_at FROM photos WHERE assignment_id = ? ORDER BY created_at').all(a.id);
+  res.json({
+    ...assignmentDetail(a), workerName: a.worker_name, date: a.date,
+    photos: photos.map((p) => ({ id: p.id, url: `/uploads/${p.filename}`, at: p.created_at, lat: p.lat, lng: p.lng })),
+  });
+});
+
+// ---- announcements ----
+app.get('/api/admin/announcements', requireAdmin, (req, res) => {
+  const total = db.prepare('SELECT COUNT(*) AS n FROM workers WHERE active = 1').get().n;
+  const rows = db.prepare('SELECT * FROM announcements ORDER BY created_at DESC LIMIT 50').all();
+  res.json(rows.map((a) => ({
+    id: a.id, message: a.message, active: !!a.active, at: a.created_at,
+    reads: db.prepare('SELECT COUNT(*) AS n FROM announcement_reads WHERE announcement_id = ?').get(a.id).n,
+    totalWorkers: total,
+  })));
+});
+app.post('/api/admin/announcements', requireAdmin, (req, res) => {
+  const message = (req.body.message || '').toString().trim().slice(0, 500);
+  if (!message) return res.status(400).json({ error: 'message required' });
+  db.prepare('INSERT INTO announcements (message, active, created_at) VALUES (?,1,?)').run(message, Date.now());
+  res.json({ ok: true });
+});
+app.post('/api/admin/announcements/:id/deactivate', requireAdmin, (req, res) => {
+  db.prepare('UPDATE announcements SET active = 0 WHERE id = ?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+// ---- payroll ----
+app.get('/api/admin/payroll', requireAdmin, (req, res) => {
+  // weekStart = local YYYY-MM-DD (Monday). Defaults to Monday of the current week.
+  let start;
+  if (req.query.weekStart) start = new Date(`${req.query.weekStart}T00:00:00`);
+  else { start = new Date(); start.setHours(0, 0, 0, 0); const dow = (start.getDay() + 6) % 7; start.setDate(start.getDate() - dow); }
+  const from = start.getTime();
+  const to = from + 7 * 24 * 60 * 60 * 1000;
+  const rate = Number(getSetting('hourly_rate'));
+  const currency = getSetting('currency');
+  const workers = db.prepare('SELECT id, name FROM workers WHERE active = 1 ORDER BY sort_order, name').all();
+  const rows = workers.map((w) => {
+    const shifts = db.prepare('SELECT clock_in, clock_out FROM shifts WHERE worker_id = ? AND clock_in >= ? AND clock_in < ?').all(w.id, from, to);
+    let ms = 0; const days = new Set();
+    for (const s of shifts) { ms += (s.clock_out || Date.now()) - s.clock_in; days.add(new Date(s.clock_in).toDateString()); }
+    const hours = ms / 3600000;
+    const pens = db.prepare('SELECT hours_docked, waived FROM penalties WHERE worker_id = ? AND created_at >= ? AND created_at < ?').all(w.id, from, to);
+    const activePens = pens.filter((p) => !p.waived);
+    const docked = activePens.reduce((s, p) => s + p.hours_docked, 0);
+    const net = Math.max(0, hours - docked);
+    return {
+      id: w.id, name: w.name, days: days.size, hours: +hours.toFixed(2),
+      penalties: activePens.length, hoursDocked: +docked.toFixed(2), netHours: +net.toFixed(2),
+      pay: rate > 0 ? +(net * rate).toFixed(2) : null,
+    };
+  });
+  const fmt = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  res.json({ weekStart: fmt(from), weekEnd: fmt(to - 86400000), rate, currency, rows });
 });
 
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 
 app.listen(PORT, () => {
-  console.log(`Crew Clock running on http://localhost:${PORT}`);
+  console.log(`${getSetting('business_name')} Crew Clock running on http://localhost:${PORT}`);
   console.log(`Owner dashboard: http://localhost:${PORT}/admin  (PIN: ${ADMIN_PIN})`);
 });

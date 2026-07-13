@@ -53,7 +53,74 @@ db.exec(`
     key   TEXT PRIMARY KEY,
     value TEXT
   );
+
+  -- Scheduled jobs the owner assigns to a worker for a given day.
+  CREATE TABLE IF NOT EXISTS assignments (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id    INTEGER NOT NULL,
+    title        TEXT NOT NULL,
+    address      TEXT,
+    notes        TEXT,
+    date         TEXT NOT NULL,          -- YYYY-MM-DD (local) for grouping
+    scheduled_at INTEGER,                -- optional exact time (epoch ms)
+    status       TEXT NOT NULL DEFAULT 'assigned', -- assigned|in_progress|done|skipped
+    job_id       INTEGER,                -- links to the jobs row once started
+    sort_order   INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL,
+    FOREIGN KEY (worker_id) REFERENCES workers(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS checklist_items (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL,
+    text          TEXT NOT NULL,
+    done          INTEGER NOT NULL DEFAULT 0,
+    done_at       INTEGER,
+    sort_order    INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (assignment_id) REFERENCES assignments(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS photos (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER,
+    worker_id     INTEGER NOT NULL,
+    filename      TEXT NOT NULL,
+    lat           REAL,
+    lng           REAL,
+    created_at    INTEGER NOT NULL
+  );
+
+  -- Event-based GPS pings captured at clock-in / job start / finish / photo.
+  CREATE TABLE IF NOT EXISTS locations (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id  INTEGER NOT NULL,
+    lat        REAL NOT NULL,
+    lng        REAL NOT NULL,
+    accuracy   REAL,
+    context    TEXT,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS announcements (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    message    TEXT NOT NULL,
+    active     INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS announcement_reads (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    announcement_id INTEGER NOT NULL,
+    worker_id       INTEGER NOT NULL,
+    read_at         INTEGER NOT NULL
+  );
 `);
+
+// Lightweight migration: add columns to the existing jobs table if missing.
+const jobCols = db.prepare('PRAGMA table_info(jobs)').all().map((c) => c.name);
+if (!jobCols.includes('assignment_id')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN assignment_id INTEGER');
+}
 
 // Default settings (only inserted once).
 const DEFAULT_SETTINGS = {
@@ -61,6 +128,10 @@ const DEFAULT_SETTINGS = {
   penalty_hours: '1',     // hours docked per late arrival
   hourly_rate: '0',       // 0 = don't show money, just hours
   currency: '£',
+  business_name: 'Premier Cleaning',
+  brand_color: '#1f7a4d', // Premier Cleaning green
+  require_photo: '1',     // must add an after-photo before finishing a scheduled job
+  require_checklist: '1', // must tick every checklist item before finishing
 };
 const insertSetting = db.prepare(
   'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)'
