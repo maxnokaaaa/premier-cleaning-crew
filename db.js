@@ -1,12 +1,31 @@
-// Database layer: SQLite via better-sqlite3.
-// One file on disk (crew.db). Everything is stored as UTC epoch milliseconds.
+// Database layer: SQLite via libsql (better-sqlite3-compatible).
+// Everything is stored as UTC epoch milliseconds.
+// If TURSO_DATABASE_URL + TURSO_AUTH_TOKEN are set, data lives in a free Turso
+// cloud database (permanent, survives restarts/redeploys). Otherwise it's a
+// plain local file — identical behaviour for local development.
 const path = require('path');
-const Database = require('better-sqlite3');
+const Database = require('libsql');
 
-// Allow the host to point the DB at a persistent disk (e.g. Render disk mount).
+const TURSO_URL = process.env.TURSO_DATABASE_URL;
+const TURSO_TOKEN = process.env.TURSO_AUTH_TOKEN;
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'crew.db');
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
+
+let db;
+if (TURSO_URL && TURSO_TOKEN) {
+  // Embedded replica: reads served from a local cache, writes forwarded to the
+  // Turso cloud primary (durable). On boot we pull the cloud copy down first.
+  db = new Database(process.env.REPLICA_PATH || '/tmp/crew-replica.db', {
+    syncUrl: TURSO_URL,
+    authToken: TURSO_TOKEN,
+  });
+  try { db.sync(); } catch (e) { console.error('Turso initial sync failed:', e.message); }
+  setInterval(() => { try { db.sync(); } catch (e) {} }, 60000);
+  console.log('Database: Turso cloud (persistent)');
+} else {
+  db = new Database(DB_PATH);
+  console.log('Database: local file', DB_PATH);
+}
+try { db.pragma('journal_mode = WAL'); } catch (e) { /* not applicable on replicas */ }
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS workers (

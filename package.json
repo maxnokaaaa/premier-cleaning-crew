@@ -11,8 +11,8 @@
     "node": "22.x"
   },
   "dependencies": {
-    "better-sqlite3": "^11.8.1",
     "express": "^4.21.2",
+    "libsql": "^0.5.29",
     "node-ical": "^0.26.1"
   }
 }
