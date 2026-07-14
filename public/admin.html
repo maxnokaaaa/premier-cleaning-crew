@@ -67,6 +67,7 @@
     </header>
     <div class="tabs">
       <div class="tab on" data-tab="live" onclick="showTab('live')">Live crew</div>
+      <div class="tab" data-tab="today" onclick="showTab('today')">Today 💶</div>
       <div class="tab" data-tab="schedule" onclick="showTab('schedule')">Schedule</div>
       <div class="tab" data-tab="payroll" onclick="showTab('payroll')">Payroll</div>
       <div class="tab" data-tab="messages" onclick="showTab('messages')">Messages</div>
@@ -76,6 +77,7 @@
       <div class="tab" data-tab="settings" onclick="showTab('settings')">Settings</div>
     </div>
     <div id="tab-live"></div>
+    <div id="tab-today" class="hidden"></div>
     <div id="tab-schedule" class="hidden"></div>
     <div id="tab-payroll" class="hidden"></div>
     <div id="tab-messages" class="hidden"></div>
@@ -90,7 +92,7 @@
 const $=(id)=>document.getElementById(id);
 let PIN=localStorage.getItem('crew_pin')||'';
 let skew=0, tickTimer=null, pollTimer=null, cur='live', settingsCache={};
-let schedDate=todayStr(), payWeek=null;
+let schedDate=todayStr(), payWeek=null, todayDate=todayStr();
 function hdr(){ return {'Content-Type':'application/json','x-admin-pin':PIN}; }
 const initials=(n)=>n.split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase();
 function todayStr(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
@@ -109,8 +111,8 @@ function enter(){ $('login').classList.add('hidden'); $('app').classList.remove(
 function showTab(t){
   cur=t;
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('on', el.dataset.tab===t));
-  ['live','schedule','payroll','messages','penalties','log','workers','settings'].forEach(x=>$('tab-'+x).classList.toggle('hidden', x!==t));
-  ({live:loadLive, schedule:loadSchedule, payroll:loadPayroll, messages:loadMessages, penalties:loadPenalties, log:loadLog, workers:loadWorkers, settings:loadSettings})[t]();
+  ['live','today','schedule','payroll','messages','penalties','log','workers','settings'].forEach(x=>$('tab-'+x).classList.toggle('hidden', x!==t));
+  ({live:loadLive, today:loadToday, schedule:loadSchedule, payroll:loadPayroll, messages:loadMessages, penalties:loadPenalties, log:loadLog, workers:loadWorkers, settings:loadSettings})[t]();
 }
 
 const SM={ off:{txt:'Clocked out',c:'#93a2bf'}, idle:{txt:'On shift (idle)',c:'#2f6bff'}, working:{txt:'Working',c:'#16c07a'}, traveling:{txt:'Travelling',c:'#f4a723'}, late:{txt:'OVERDUE',c:'#f0524f'} };
@@ -150,6 +152,46 @@ function startTicks(){
     if(left<=0){ el.textContent='00:00'; el.classList.add('over'); return; } if(left<=300) el.classList.add('warn');
     el.textContent=`${String(Math.floor(left/60)).padStart(2,'0')}:${String(left%60).padStart(2,'0')}`; }); },1000);
 }
+
+// ---------- Today: timesheet + wages (editable) ----------
+function toLocalInput(ms){ if(!ms) return ''; const d=new Date(ms); const p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; }
+async function loadToday(){
+  const d=await fetch('/api/admin/today?date='+todayDate,{headers:hdr()}).then(r=>r.json());
+  const cur=d.currency;
+  let html=`<div class="row" style="margin:2px 4px 12px"><h3 style="margin:0">💶 Today's timesheet & wages</h3>
+    <input type="date" style="width:auto" value="${todayDate}" onchange="todayDate=this.value; loadToday()"></div>
+    <div class="kpi">
+      <div class="card"><b>${cur}${d.totals.pay.toFixed(2)}</b><span>crew wages today</span></div>
+      <div class="card"><b>${d.totals.hours.toFixed(1)}h</b><span>hours worked</span></div>
+      <div class="card"><b style="color:${d.totals.openCount?'var(--amber)':'inherit'}">${d.totals.openCount}</b><span>still clocked in</span></div>
+    </div>`;
+  if(d.totals.openCount) html+=`<div class="card" style="border-color:var(--amber);color:var(--amber)">⚠️ ${d.totals.openCount} worker(s) still clocked in — set their finish time below so today's total is exact.</div>`;
+  if(!d.rows.length) html+=`<div class="card muted">No one clocked in for this day.</div>`;
+  for(const r of d.rows){
+    html+=`<div class="card" style="${r.open?'border-color:var(--amber)':''}">
+      <div class="row"><div class="name">${escapeHtml(r.name)}${r.place?` <span class="pill" style="background:rgba(31,122,77,.2);color:#7fe6b8">📍 ${escapeHtml(r.place)}</span>`:''}</div>
+        <div style="text-align:right"><b>${cur}${r.pay.toFixed(2)}</b><div class="sub">${r.hours.toFixed(2)}h · ${cur}${r.rate}/h</div></div></div>
+      <div class="grid2" style="margin-top:10px">
+        <div><label style="margin:0 0 4px">Clock in</label><input id="ci_${r.shiftId}" type="datetime-local" value="${toLocalInput(r.clockIn)}"></div>
+        <div><label style="margin:0 0 4px">Clock out ${r.open?'<span style="color:var(--amber)">— still open</span>':''}</label><input id="co_${r.shiftId}" type="datetime-local" value="${toLocalInput(r.clockOut)}"></div>
+      </div>
+      <div class="row" style="margin-top:10px;justify-content:flex-end;gap:8px">
+        ${r.open?`<button class="btn ghost small" onclick="clockOutNow(${r.shiftId})">Clock out = now</button>`:''}
+        <button class="btn brand small" onclick="saveShift(${r.shiftId},event)">Save</button></div>
+    </div>`;
+  }
+  $('tab-today').innerHTML=html;
+}
+async function saveShift(id,ev){
+  const ci=$('ci_'+id).value, co=$('co_'+id).value;
+  if(!ci){ alert('Clock-in time is required'); return; }
+  const body={ clockInMs:new Date(ci).getTime(), clockOutMs: co?new Date(co).getTime():null };
+  const r=await fetch('/api/admin/shifts/'+id,{method:'POST',headers:hdr(),body:JSON.stringify(body)});
+  if(!r.ok){ const e=await r.json().catch(()=>({})); alert(e.error||'Could not save'); return; }
+  if(ev&&ev.target) ev.target.textContent='Saved ✓';
+  loadToday();
+}
+function clockOutNow(id){ const d=new Date(),p=n=>String(n).padStart(2,'0'); $('co_'+id).value=`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; saveShift(id); }
 
 // ---------- Schedule ----------
 async function loadSchedule(){

@@ -630,6 +630,45 @@ app.get('/api/admin/payroll', requireAdmin, (req, res) => {
   res.json({ weekStart: fmt(from), weekEnd: fmt(to - 86400000), rate: anyRate ? 1 : 0, currency, rows });
 });
 
+// ---- today's timesheet + earnings ----
+app.get('/api/admin/today', requireAdmin, (req, res) => {
+  const dateStr = (req.query.date || todayStr()).toString();
+  const dayStart = new Date(dateStr + 'T00:00:00').getTime();
+  const dayEnd = dayStart + 86400000;
+  const currency = getSetting('currency');
+  const now = Date.now();
+  const rows = db.prepare(
+    `SELECT s.id AS shiftId, s.worker_id, s.clock_in, s.clock_out, s.place, w.name, w.hourly_rate
+     FROM shifts s JOIN workers w ON w.id = s.worker_id
+     WHERE s.clock_in >= ? AND s.clock_in < ? ORDER BY s.clock_in`
+  ).all(dayStart, dayEnd);
+  let totHours = 0, totPay = 0, openCount = 0;
+  const out = rows.map((r) => {
+    const rate = workerRate(r);
+    const end = r.clock_out || now;
+    const hours = Math.max(0, (end - r.clock_in) / 3600000);
+    const pay = rate * hours;
+    if (!r.clock_out) openCount++;
+    totHours += hours; totPay += pay;
+    return { shiftId: r.shiftId, workerId: r.worker_id, name: r.name, rate, place: r.place || null,
+      clockIn: r.clock_in, clockOut: r.clock_out, open: !r.clock_out, hours: +hours.toFixed(2), pay: +pay.toFixed(2) };
+  });
+  res.json({ date: dateStr, currency, rows: out, totals: { hours: +totHours.toFixed(2), pay: +totPay.toFixed(2), openCount } });
+});
+
+// Owner edits a shift's clock-in / clock-out (epoch ms from the browser).
+app.post('/api/admin/shifts/:id', requireAdmin, (req, res) => {
+  const shift = db.prepare('SELECT * FROM shifts WHERE id = ?').get(Number(req.params.id));
+  if (!shift) return res.status(404).json({ error: 'not found' });
+  let ci = shift.clock_in, co = shift.clock_out;
+  if (req.body.clockInMs != null) ci = Number(req.body.clockInMs);
+  if (req.body.clockOutMs !== undefined) co = req.body.clockOutMs ? Number(req.body.clockOutMs) : null;
+  if (!ci || isNaN(ci)) return res.status(400).json({ error: 'bad clock-in' });
+  if (co != null && co <= ci) return res.status(400).json({ error: 'Clock-out must be after clock-in.' });
+  db.prepare('UPDATE shifts SET clock_in = ?, clock_out = ? WHERE id = ?').run(ci, co, shift.id);
+  res.json({ ok: true });
+});
+
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 
 app.listen(PORT, () => {
