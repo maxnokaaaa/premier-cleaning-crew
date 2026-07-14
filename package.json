@@ -13,6 +13,7 @@
   "dependencies": {
     "express": "^4.21.2",
     "libsql": "^0.5.29",
-    "node-ical": "^0.26.1"
+    "node-ical": "^0.26.1",
+    "web-push": "^3.6.7"
   }
 }

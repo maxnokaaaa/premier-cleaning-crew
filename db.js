@@ -133,6 +133,15 @@ db.exec(`
     worker_id       INTEGER NOT NULL,
     read_at         INTEGER NOT NULL
   );
+
+  -- Web-push subscriptions so we can send notifications to a worker's phone.
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id  INTEGER NOT NULL,
+    endpoint   TEXT NOT NULL UNIQUE,
+    sub        TEXT NOT NULL,          -- full subscription JSON
+    created_at INTEGER NOT NULL
+  );
 `);
 
 // Lightweight migrations: add columns to existing tables if missing.
@@ -143,6 +152,17 @@ if (!jobCols.includes('assignment_id')) {
 const asgCols = db.prepare('PRAGMA table_info(assignments)').all().map((c) => c.name);
 if (!asgCols.includes('calendar_uid')) {
   db.exec('ALTER TABLE assignments ADD COLUMN calendar_uid TEXT'); // links to a Google Calendar event
+}
+const workerCols = db.prepare('PRAGMA table_info(workers)').all().map((c) => c.name);
+if (!workerCols.includes('hourly_rate')) {
+  db.exec('ALTER TABLE workers ADD COLUMN hourly_rate REAL'); // per-worker rate; null = use global default
+}
+const shiftCols = db.prepare('PRAGMA table_info(shifts)').all().map((c) => c.name);
+if (!shiftCols.includes('place')) {
+  db.exec('ALTER TABLE shifts ADD COLUMN place TEXT'); // where the worker is working today
+}
+if (!shiftCols.includes('last_checkin')) {
+  db.exec('ALTER TABLE shifts ADD COLUMN last_checkin INTEGER'); // last check-in push sent
 }
 
 // Default settings (only inserted once).
@@ -156,6 +176,7 @@ const DEFAULT_SETTINGS = {
   require_photo: '1',     // must add an after-photo before finishing a scheduled job
   require_checklist: '1', // must tick every checklist item before finishing
   calendar_ical_url: '',  // Premier calendar "Secret address in iCal format" — jobs flow in from here
+  checkin_minutes: '30',  // how often to push a "still on the job?" check-in while clocked in (0 = off)
 };
 const insertSetting = db.prepare(
   'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)'

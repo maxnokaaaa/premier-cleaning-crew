@@ -9,6 +9,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const express = require('express');
 const ical = require('node-ical');
+const webpush = require('web-push');
 const { db } = require('./db');
 
 const app = express();
@@ -30,6 +31,37 @@ const setSetting = db.prepare(
 const travelMs = () => Number(getSetting('travel_minutes')) * 60 * 1000;
 const penaltyHours = () => Number(getSetting('penalty_hours'));
 const brand = () => ({ businessName: getSetting('business_name'), brandColor: getSetting('brand_color') });
+// A worker's own rate if set, else the global default.
+const workerRate = (w) => {
+  const r = (w.hourly_rate !== null && w.hourly_rate !== undefined && w.hourly_rate !== '') ? Number(w.hourly_rate) : Number(getSetting('hourly_rate'));
+  return isNaN(r) ? 0 : r;
+};
+
+// ---------- web push (phone notifications) ----------
+let VAPID_PUBLIC = getSetting('vapid_public');
+let VAPID_PRIVATE = getSetting('vapid_private');
+if (!VAPID_PUBLIC || !VAPID_PRIVATE) {
+  const keys = webpush.generateVAPIDKeys();
+  VAPID_PUBLIC = keys.publicKey; VAPID_PRIVATE = keys.privateKey;
+  setSetting.run('vapid_public', VAPID_PUBLIC);
+  setSetting.run('vapid_private', VAPID_PRIVATE);
+}
+webpush.setVapidDetails('mailto:nokliginger123@gmail.com', VAPID_PUBLIC, VAPID_PRIVATE);
+
+async function sendPush(workerId, payload) {
+  const subs = db.prepare('SELECT * FROM push_subscriptions WHERE worker_id = ?').all(workerId);
+  const body = JSON.stringify(payload);
+  for (const s of subs) {
+    try {
+      await webpush.sendNotification(JSON.parse(s.sub), body);
+    } catch (e) {
+      if (e.statusCode === 404 || e.statusCode === 410) db.prepare('DELETE FROM push_subscriptions WHERE id = ?').run(s.id);
+    }
+  }
+}
+function pushAll(payload) {
+  for (const w of db.prepare('SELECT id FROM workers WHERE active = 1').all()) sendPush(w.id, payload);
+}
 
 const startOfToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
 const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
@@ -184,10 +216,37 @@ function sweep() {
     const minutesLate = Math.max(1, Math.round((now - job.travel_deadline) / 60000));
     insertPenalty.run(job.worker_id, job.id, now, minutesLate, penaltyHours(),
       `Missed the ${Number(getSetting('travel_minutes'))}-minute travel window after finishing a job`);
+    sendPush(job.worker_id, { title: '⚠️ Penalty logged', body: `You went over the ${Number(getSetting('travel_minutes'))}-minute travel window. ${penaltyHours()}h will be deducted. Start your next job now.`, url: '/' });
   }
 }
 setInterval(sweep, 60 * 1000);
 sweep();
+
+// ---------- check-in sweep: leash workers with periodic + travel-warning pushes ----------
+const warned5 = new Set(); // jobs already given a 5-minute warning
+function checkInSweep() {
+  const now = Date.now();
+  const cm = Number(getSetting('checkin_minutes'));
+  for (const shift of db.prepare('SELECT * FROM shifts WHERE clock_out IS NULL').all()) {
+    const st = computeState(shift.worker_id);
+    if (st.state === 'off') continue;
+    // 5-minute warning while travelling
+    if (st.state === 'traveling' && st.deadline && st.job) {
+      const leftMs = st.deadline - now;
+      if (leftMs > 0 && leftMs <= 5 * 60000 && !warned5.has(st.job.id)) {
+        warned5.add(st.job.id);
+        sendPush(shift.worker_id, { title: '⏰ 5 minutes left', body: 'Start your next job now, or a penalty will be logged.', url: '/' });
+      }
+    }
+    // periodic "still on the job?" check-in
+    const base = shift.last_checkin || shift.clock_in;
+    if (cm > 0 && now - base >= cm * 60000) {
+      db.prepare('UPDATE shifts SET last_checkin = ? WHERE id = ?').run(now, shift.id);
+      sendPush(shift.worker_id, { title: '📍 Premier Cleaning check-in', body: 'Are you still on the job? Open the app to confirm and keep your clock running.', url: '/' });
+    }
+  }
+}
+setInterval(checkInSweep, 60 * 1000);
 
 // ================= WORKER API =================
 app.get('/api/config', (req, res) => res.json(brand()));
@@ -223,6 +282,9 @@ app.get('/api/me/:id', async (req, res) => {
     travelMinutes: Number(getSetting('travel_minutes')),
     requirePhoto: getSetting('require_photo') === '1',
     requireChecklist: getSetting('require_checklist') === '1',
+    place: st.shift ? st.shift.place : null,
+    checkinMinutes: Number(getSetting('checkin_minutes')),
+    vapidPublic: VAPID_PUBLIC,
     summary: todaySummary(id),
     ...brand(),
     serverNow: Date.now(),
@@ -231,8 +293,36 @@ app.get('/api/me/:id', async (req, res) => {
 
 app.post('/api/clock-in', (req, res) => {
   const id = Number(req.body.workerId);
-  if (!openShiftFor.get(id)) db.prepare('INSERT INTO shifts (worker_id, clock_in) VALUES (?, ?)').run(id, Date.now());
+  const place = (req.body.place || '').toString().trim().slice(0, 120) || null;
+  const existing = openShiftFor.get(id);
+  if (!existing) db.prepare('INSERT INTO shifts (worker_id, clock_in, place) VALUES (?, ?, ?)').run(id, Date.now(), place);
+  else if (place) db.prepare('UPDATE shifts SET place = ? WHERE id = ?').run(place, existing.id);
   recordLocation(id, req.body, 'clock_in');
+  res.json({ ok: true });
+});
+
+// Worker updates where they're currently working (from the app).
+app.post('/api/place', (req, res) => {
+  const id = Number(req.body.workerId);
+  const shift = openShiftFor.get(id);
+  if (shift) db.prepare('UPDATE shifts SET place = ? WHERE id = ?').run((req.body.place || '').toString().trim().slice(0, 120) || null, shift.id);
+  res.json({ ok: true });
+});
+
+// Frequent live-location ping while the app is open.
+app.post('/api/location', (req, res) => {
+  recordLocation(Number(req.body.workerId), req.body, (req.body.context || 'ping').toString().slice(0, 20));
+  res.json({ ok: true });
+});
+
+// ---- push notifications ----
+app.get('/api/push/vapid', (req, res) => res.json({ key: VAPID_PUBLIC }));
+app.post('/api/push/subscribe', (req, res) => {
+  const id = Number(req.body.workerId);
+  const sub = req.body.subscription;
+  if (!id || !sub || !sub.endpoint) return res.status(400).json({ error: 'bad subscription' });
+  db.prepare('INSERT INTO push_subscriptions (worker_id, endpoint, sub, created_at) VALUES (?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET worker_id = excluded.worker_id, sub = excluded.sub')
+    .run(id, sub.endpoint, JSON.stringify(sub), Date.now());
   res.json({ ok: true });
 });
 
@@ -350,13 +440,15 @@ function requireAdmin(req, res, next) {
 app.post('/api/admin/login', (req, res) => res.json({ ok: req.body.pin === ADMIN_PIN }));
 
 app.get('/api/admin/overview', requireAdmin, (req, res) => {
-  const workers = db.prepare('SELECT id, name FROM workers WHERE active = 1 ORDER BY sort_order, name').all();
+  const workers = db.prepare('SELECT id, name, hourly_rate FROM workers WHERE active = 1 ORDER BY sort_order, name').all();
   const crew = workers.map((w) => {
     const st = computeState(w.id);
     const loc = latestLocation.get(w.id);
     const assignments = todaysAssignments(w.id);
     return {
-      ...w, state: st.state, deadline: st.deadline, summary: todaySummary(w.id),
+      id: w.id, name: w.name, hourlyRate: workerRate(w),
+      state: st.state, deadline: st.deadline, summary: todaySummary(w.id),
+      place: st.shift ? st.shift.place : null,
       location: loc ? { lat: loc.lat, lng: loc.lng, at: loc.created_at, context: loc.context } : null,
       jobsScheduled: assignments.length, jobsDoneScheduled: assignments.filter((a) => a.status === 'done').length,
     };
@@ -368,10 +460,23 @@ app.get('/api/admin/overview', requireAdmin, (req, res) => {
       hourlyRate: Number(getSetting('hourly_rate')), currency: getSetting('currency'),
       requirePhoto: getSetting('require_photo') === '1', requireChecklist: getSetting('require_checklist') === '1',
       calendarIcalUrl: getSetting('calendar_ical_url') || '',
+      checkinMinutes: Number(getSetting('checkin_minutes')),
       ...brand(),
     },
     serverNow: Date.now(),
   });
+});
+
+// Workers with their pay rates (for the Workers tab).
+app.get('/api/admin/workers', requireAdmin, (req, res) => {
+  res.json(db.prepare('SELECT id, name, hourly_rate FROM workers WHERE active = 1 ORDER BY sort_order, name').all()
+    .map((w) => ({ id: w.id, name: w.name, rate: (w.hourly_rate ?? null), effectiveRate: workerRate(w) })));
+});
+app.post('/api/admin/workers/:id/rate', requireAdmin, (req, res) => {
+  const raw = req.body.rate;
+  const rate = (raw === '' || raw === null || raw === undefined) ? null : Number(raw);
+  db.prepare('UPDATE workers SET hourly_rate = ? WHERE id = ?').run(rate, Number(req.params.id));
+  res.json({ ok: true });
 });
 
 app.get('/api/admin/penalties', requireAdmin, (req, res) => {
@@ -412,7 +517,7 @@ app.post('/api/admin/workers/:id/remove', requireAdmin, (req, res) => {
 });
 
 app.post('/api/admin/settings', requireAdmin, (req, res) => {
-  const allowed = ['travel_minutes', 'penalty_hours', 'hourly_rate', 'currency', 'business_name', 'brand_color', 'require_photo', 'require_checklist', 'calendar_ical_url'];
+  const allowed = ['travel_minutes', 'penalty_hours', 'hourly_rate', 'currency', 'business_name', 'brand_color', 'require_photo', 'require_checklist', 'calendar_ical_url', 'checkin_minutes'];
   for (const key of allowed) if (req.body[key] !== undefined) setSetting.run(key, String(req.body[key]));
   res.json({ ok: true });
 });
@@ -486,6 +591,7 @@ app.post('/api/admin/announcements', requireAdmin, (req, res) => {
   const message = (req.body.message || '').toString().trim().slice(0, 500);
   if (!message) return res.status(400).json({ error: 'message required' });
   db.prepare('INSERT INTO announcements (message, active, created_at) VALUES (?,1,?)').run(message, Date.now());
+  pushAll({ title: '📣 ' + getSetting('business_name'), body: message, url: '/' });
   res.json({ ok: true });
 });
 app.post('/api/admin/announcements/:id/deactivate', requireAdmin, (req, res) => {
@@ -501,10 +607,10 @@ app.get('/api/admin/payroll', requireAdmin, (req, res) => {
   else { start = new Date(); start.setHours(0, 0, 0, 0); const dow = (start.getDay() + 6) % 7; start.setDate(start.getDate() - dow); }
   const from = start.getTime();
   const to = from + 7 * 24 * 60 * 60 * 1000;
-  const rate = Number(getSetting('hourly_rate'));
   const currency = getSetting('currency');
-  const workers = db.prepare('SELECT id, name FROM workers WHERE active = 1 ORDER BY sort_order, name').all();
+  const workers = db.prepare('SELECT id, name, hourly_rate FROM workers WHERE active = 1 ORDER BY sort_order, name').all();
   const rows = workers.map((w) => {
+    const rate = workerRate(w); // each worker's own rate
     const shifts = db.prepare('SELECT clock_in, clock_out FROM shifts WHERE worker_id = ? AND clock_in >= ? AND clock_in < ?').all(w.id, from, to);
     let ms = 0; const days = new Set();
     for (const s of shifts) { ms += (s.clock_out || Date.now()) - s.clock_in; days.add(new Date(s.clock_in).toDateString()); }
@@ -514,13 +620,14 @@ app.get('/api/admin/payroll', requireAdmin, (req, res) => {
     const docked = activePens.reduce((s, p) => s + p.hours_docked, 0);
     const net = Math.max(0, hours - docked);
     return {
-      id: w.id, name: w.name, days: days.size, hours: +hours.toFixed(2),
+      id: w.id, name: w.name, rate, days: days.size, hours: +hours.toFixed(2),
       penalties: activePens.length, hoursDocked: +docked.toFixed(2), netHours: +net.toFixed(2),
       pay: rate > 0 ? +(net * rate).toFixed(2) : null,
     };
   });
+  const anyRate = rows.some((r) => r.rate > 0);
   const fmt = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
-  res.json({ weekStart: fmt(from), weekEnd: fmt(to - 86400000), rate, currency, rows });
+  res.json({ weekStart: fmt(from), weekEnd: fmt(to - 86400000), rate: anyRate ? 1 : 0, currency, rows });
 });
 
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));

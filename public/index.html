@@ -4,6 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#0b1220" />
+<link rel="manifest" href="/manifest.json" />
+<link rel="apple-touch-icon" href="/icon.svg" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
 <title>Premier Cleaning</title>
 <style>
   :root{
@@ -146,8 +149,50 @@ function selectWorker(w){
   me=w; localStorage.setItem('crew_worker', JSON.stringify(w));
   $('pick').classList.add('hidden'); $('tagline').textContent=w.name; $('me').classList.remove('hidden');
   refresh(); clearInterval(poll); poll=setInterval(refresh, 15000);
+  startLocationPings(); setupPush();
 }
-function goBack(){ localStorage.removeItem('crew_worker'); me=null; clearInterval(poll); clearInterval(tick); $('me').classList.add('hidden'); $('pick').classList.remove('hidden'); $('tagline').textContent='Tap your name to start'; loadWorkers(); }
+function goBack(){ localStorage.removeItem('crew_worker'); me=null; clearInterval(poll); clearInterval(tick); clearInterval(pingTimer); $('me').classList.add('hidden'); $('pick').classList.remove('hidden'); $('tagline').textContent='Tap your name to start'; loadWorkers(); }
+
+// ---- live location pings (every 2 min while on shift & app open) ----
+let pingTimer=null;
+function startLocationPings(){
+  clearInterval(pingTimer);
+  pingTimer=setInterval(async ()=>{
+    if(!me || !lastData || lastData.state==='off') return;
+    const gps=await getGPS();
+    if(gps.lat!=null) fetch('/api/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workerId:me.id, ...gps, context:'ping'})});
+  }, 120000);
+}
+
+// ---- push notifications ----
+function urlB64ToUint8(base64){ const pad='='.repeat((4-base64.length%4)%4); const b=(base64+pad).replace(/-/g,'+').replace(/_/g,'/'); const raw=atob(b); const arr=new Uint8Array(raw.length); for(let i=0;i<raw.length;i++)arr[i]=raw.charCodeAt(i); return arr; }
+async function setupPush(){
+  if(!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  try{
+    const reg=await navigator.serviceWorker.register('/sw.js');
+    if(Notification.permission!=='granted') return; // will show a button instead
+    const key=(lastData&&lastData.vapidPublic)||await fetch('/api/push/vapid').then(r=>r.json()).then(j=>j.key);
+    const sub=await reg.pushManager.getSubscription() || await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:urlB64ToUint8(key)});
+    await fetch('/api/push/subscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workerId:me.id, subscription:sub})});
+  }catch(e){}
+}
+async function enableAlerts(){
+  if(!('Notification' in window)){ toast('Notifications not supported on this phone'); return; }
+  const perm=await Notification.requestPermission();
+  if(perm==='granted'){ await setupPush(); toast('Alerts on ✓'); refresh(); }
+  else toast('Alerts blocked — allow them in your browser settings');
+}
+async function updatePlace(){
+  const p=prompt('Where are you working now?', (lastData&&lastData.place)||'');
+  if(p===null) return;
+  await fetch('/api/place',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workerId:me.id, place:p.trim()})});
+  refresh();
+}
+async function clockIn(){
+  const place=($('placeInput')&&$('placeInput').value.trim())||'';
+  await act('/api/clock-in',{place});
+  setupPush();
+}
 
 async function act(path, extra){
   const gps = await getGPS();
@@ -207,9 +252,21 @@ function renderAnnounce(a){
 async function readAnn(id){ await fetch('/api/announcement/'+id+'/read',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workerId:me.id})}); refresh(); }
 
 function renderActions(d){
-  const box=$('actions'); box.innerHTML='';
+  const box=$('actions');
+  const prevPlace=($('placeInput')&&$('placeInput').value)||''; // keep what they've typed across auto-refreshes
+  box.innerHTML='';
   const add=(label,cls,fn)=>{ const b=document.createElement('button'); b.className='btn '+cls; b.textContent=label; b.onclick=fn; box.appendChild(b); };
-  if(d.state==='off'){ add('🟢  Clock In','brand',()=>act('/api/clock-in')); return; }
+  if(d.state==='off'){
+    box.insertAdjacentHTML('beforeend',`<input id="placeInput" value="${prevPlace.replace(/"/g,'&quot;')}" placeholder="Where are you working today? (e.g. Tonio, Mellieħa)" style="width:100%;padding:16px;border-radius:14px;border:1px solid var(--line);background:var(--card);color:var(--text);font-size:16px;margin:12px 0 0" />`);
+    add('🟢  Clock In','brand', clockIn);
+    return;
+  }
+  // on shift: show where they're working + let them change it
+  box.insertAdjacentHTML('beforeend', `<div class="sub" style="text-align:center;margin:2px 0 10px">📍 Working at: <b style="color:var(--text)">${d.place?escapeHtml(d.place):'—'}</b> · <a href="javascript:void(0)" onclick="updatePlace()" style="color:var(--blue)">change</a></div>`);
+  // notifications prompt if not yet enabled
+  if(('Notification' in window) && Notification.permission!=='granted'){
+    box.insertAdjacentHTML('beforeend','<button class="btn amber" onclick="enableAlerts()">🔔 Turn on job alerts (recommended)</button>');
+  }
   if(d.state==='traveling'||d.state==='late'){ box.insertAdjacentHTML('beforeend','<p class="sub" style="text-align:center;margin:6px 0 0">👇 Tap your next client below to start</p>'); }
   if(d.state==='idle'||d.state==='traveling'||d.state==='late'){ add('▶️  Start an unscheduled job','ghost',()=>act('/api/start-job')); }
   add('⏹  Clock Out (end of day)','ghost',()=>{ if(confirm('Clock out for the day?')) act('/api/clock-out'); });
