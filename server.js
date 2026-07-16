@@ -671,6 +671,39 @@ app.post('/api/admin/shifts/:id', requireAdmin, (req, res) => {
 
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 
+// ---------- Bot bookings mirrored into the calendar ----------
+// The WhatsApp bot upserts EVERY booking here (ref "pcm-<id>") so the
+// subscribed Google Calendar shows the full schedule, assigned or not.
+db.exec(`CREATE TABLE IF NOT EXISTS calendar_events (
+  ref          TEXT PRIMARY KEY,
+  title        TEXT NOT NULL,
+  date         TEXT NOT NULL,
+  time         TEXT,
+  duration_min INTEGER DEFAULT 180,
+  address      TEXT,
+  notes        TEXT,
+  status       TEXT DEFAULT 'confirmed',
+  updated_at   INTEGER
+);`);
+
+app.post('/api/admin/calendar-events', requireAdmin, (req, res) => {
+  const { ref, title, date, time, durationMin, address, notes, status } = req.body || {};
+  if (!ref || !title || !date) return res.status(400).json({ error: 'ref, title, date required' });
+  if (status === 'cancelled') {
+    db.prepare('DELETE FROM calendar_events WHERE ref = ?').run(String(ref));
+    return res.json({ ok: true, removed: true });
+  }
+  db.prepare(`INSERT INTO calendar_events (ref, title, date, time, duration_min, address, notes, status, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(ref) DO UPDATE SET title=excluded.title, date=excluded.date, time=excluded.time,
+        duration_min=excluded.duration_min, address=excluded.address, notes=excluded.notes,
+        status=excluded.status, updated_at=excluded.updated_at`)
+    .run(String(ref), String(title).slice(0, 140), String(date), time ? String(time) : null,
+      Number(durationMin) || 180, address ? String(address).slice(0, 200) : null,
+      notes ? String(notes).slice(0, 400) : null, status || 'confirmed', Date.now());
+  res.json({ ok: true });
+});
+
 // ---------- Calendar feed (subscribe from Google Calendar → "From URL") ----------
 // All crew assignments (past 7 days → next 60) as iCal. Add once in Google
 // Calendar: Settings → Add calendar → From URL → this address. It then stays
@@ -690,7 +723,29 @@ app.get('/calendar.ics', (req, res) => {
   const esc = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\n/g, '\\n');
   const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Premier Cleaning//CrewClock//EN',
     'CALSCALE:GREGORIAN', 'X-WR-CALNAME:PCM Jobs', 'X-WR-TIMEZONE:Europe/Malta'];
+
+  // Bot bookings (the full schedule, assigned or not).
+  const events = db.prepare(`SELECT * FROM calendar_events
+    WHERE date >= date('now','-7 days') AND date <= date('now','+60 days') ORDER BY date, time`).all();
+  const bookingRefs = new Set(events.map((e) => e.ref));
+  for (const e of events) {
+    const start = new Date(`${e.date}T${e.time || '08:00'}:00Z`);
+    const end = new Date(start.getTime() + (e.duration_min || 180) * 60000);
+    L.push('BEGIN:VEVENT');
+    L.push(`UID:${e.ref}@premier-cleaning-crew`);
+    L.push(`DTSTART;TZID=Europe/Malta:${fmtWall(start)}`);
+    L.push(`DTEND;TZID=Europe/Malta:${fmtWall(end)}`);
+    L.push(`SUMMARY:${esc(e.title)}`);
+    if (e.address) L.push(`LOCATION:${esc(e.address)}`);
+    if (e.notes) L.push(`DESCRIPTION:${esc(e.notes)}`);
+    L.push('END:VEVENT');
+  }
+
+  // Crew assignments — skipping ones that mirror a bot booking (job #N ↔ pcm-N)
+  // so the calendar shows each job once.
   for (const a of rows) {
+    const jobRef = (a.title || '').match(/job #(\d+)/i);
+    if (jobRef && bookingRefs.has(`pcm-${jobRef[1]}`)) continue;
     const start = a.scheduled_at ? new Date(a.scheduled_at) : new Date(`${a.date}T08:00:00Z`);
     const end = new Date(start.getTime() + 3 * 3600 * 1000);
     L.push('BEGIN:VEVENT');
