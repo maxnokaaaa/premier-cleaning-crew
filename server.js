@@ -671,6 +671,42 @@ app.post('/api/admin/shifts/:id', requireAdmin, (req, res) => {
 
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 
+// ---------- Calendar feed (subscribe from Google Calendar → "From URL") ----------
+// All crew assignments (past 7 days → next 60) as iCal. Add once in Google
+// Calendar: Settings → Add calendar → From URL → this address. It then stays
+// in sync automatically (jobs the WhatsApp bot or admin dispatches included).
+app.get('/calendar.ics', (req, res) => {
+  if ((req.query.pin || '') !== ADMIN_PIN) return res.status(401).send('bad pin');
+  const rows = db.prepare(`
+    SELECT a.*, w.name AS worker FROM assignments a
+    JOIN workers w ON w.id = a.worker_id
+    WHERE a.date >= date('now','-7 days') AND a.date <= date('now','+60 days')
+      AND a.status != 'skipped'
+    ORDER BY a.date, a.scheduled_at`).all();
+  const pad = (n) => String(n).padStart(2, '0');
+  // scheduled_at was parsed on this (UTC) server from Malta wall-clock text, so
+  // UTC getters recover the intended wall time; we label it TZID Europe/Malta.
+  const fmtWall = (d) => `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}00`;
+  const esc = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\n/g, '\\n');
+  const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Premier Cleaning//CrewClock//EN',
+    'CALSCALE:GREGORIAN', 'X-WR-CALNAME:PCM Jobs', 'X-WR-TIMEZONE:Europe/Malta'];
+  for (const a of rows) {
+    const start = a.scheduled_at ? new Date(a.scheduled_at) : new Date(`${a.date}T08:00:00Z`);
+    const end = new Date(start.getTime() + 3 * 3600 * 1000);
+    L.push('BEGIN:VEVENT');
+    L.push(`UID:ccass-${a.id}@premier-cleaning-crew`);
+    L.push(`DTSTART;TZID=Europe/Malta:${fmtWall(start)}`);
+    L.push(`DTEND;TZID=Europe/Malta:${fmtWall(end)}`);
+    L.push(`SUMMARY:${esc(`${a.title} — ${a.worker}${a.status === 'done' ? ' ✅' : ''}`)}`);
+    if (a.address) L.push(`LOCATION:${esc(a.address)}`);
+    if (a.notes) L.push(`DESCRIPTION:${esc(a.notes)}`);
+    L.push('END:VEVENT');
+  }
+  L.push('END:VCALENDAR');
+  res.set('Content-Type', 'text/calendar; charset=utf-8');
+  res.send(L.join('\r\n'));
+});
+
 app.listen(PORT, () => {
   console.log(`${getSetting('business_name')} Crew Clock running on http://localhost:${PORT}`);
   console.log(`Owner dashboard: http://localhost:${PORT}/admin  (PIN: ${ADMIN_PIN})`);
