@@ -536,6 +536,10 @@ app.post('/api/admin/assignments', requireAdmin, (req, res) => {
   const { workerId, title, address, notes, date, time, checklist } = req.body;
   if (!workerId || !title) return res.status(400).json({ error: 'worker and title required' });
   const d = (date || todayStr()).toString();
+  // DEDUP: the same worker + title + date is the same job — return the existing
+  // assignment instead of stacking duplicates (restarts used to pile these up).
+  const dup = db.prepare('SELECT id FROM assignments WHERE worker_id = ? AND title = ? AND date = ?').get(Number(workerId), title.toString().slice(0, 120), d);
+  if (dup) return res.json({ ok: true, id: dup.id, deduped: true });
   let scheduledAt = null;
   if (time) { const dt = new Date(`${d}T${time}:00`); if (!isNaN(dt)) scheduledAt = dt.getTime(); }
   const max = db.prepare('SELECT MAX(sort_order) AS m FROM assignments WHERE worker_id = ? AND date = ?').get(Number(workerId), d).m || 0;
