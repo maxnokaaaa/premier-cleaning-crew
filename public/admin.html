@@ -68,6 +68,7 @@
     <div class="tabs">
       <div class="tab on" data-tab="live" onclick="showTab('live')">Live crew</div>
       <div class="tab" data-tab="today" onclick="showTab('today')">Today 💶</div>
+      <div class="tab" data-tab="wages" onclick="showTab('wages')">Wages 💰</div>
       <div class="tab" data-tab="schedule" onclick="showTab('schedule')">Schedule</div>
       <div class="tab" data-tab="payroll" onclick="showTab('payroll')">Payroll</div>
       <div class="tab" data-tab="messages" onclick="showTab('messages')">Messages</div>
@@ -78,6 +79,7 @@
     </div>
     <div id="tab-live"></div>
     <div id="tab-today" class="hidden"></div>
+    <div id="tab-wages" class="hidden"></div>
     <div id="tab-schedule" class="hidden"></div>
     <div id="tab-payroll" class="hidden"></div>
     <div id="tab-messages" class="hidden"></div>
@@ -111,8 +113,8 @@ function enter(){ $('login').classList.add('hidden'); $('app').classList.remove(
 function showTab(t){
   cur=t;
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('on', el.dataset.tab===t));
-  ['live','today','schedule','payroll','messages','penalties','log','workers','settings'].forEach(x=>$('tab-'+x).classList.toggle('hidden', x!==t));
-  ({live:loadLive, today:loadToday, schedule:loadSchedule, payroll:loadPayroll, messages:loadMessages, penalties:loadPenalties, log:loadLog, workers:loadWorkers, settings:loadSettings})[t]();
+  ['live','today','wages','schedule','payroll','messages','penalties','log','workers','settings'].forEach(x=>$('tab-'+x).classList.toggle('hidden', x!==t));
+  ({live:loadLive, today:loadToday, wages:loadWages, schedule:loadSchedule, payroll:loadPayroll, messages:loadMessages, penalties:loadPenalties, log:loadLog, workers:loadWorkers, settings:loadSettings})[t]();
 }
 
 const SM={ off:{txt:'Clocked out',c:'#93a2bf'}, idle:{txt:'On shift (idle)',c:'#2f6bff'}, working:{txt:'Working',c:'#16c07a'}, traveling:{txt:'Travelling',c:'#f4a723'}, late:{txt:'OVERDUE',c:'#f0524f'} };
@@ -192,6 +194,54 @@ async function saveShift(id,ev){
   loadToday();
 }
 function clockOutNow(id){ const d=new Date(),p=n=>String(n).padStart(2,'0'); $('co_'+id).value=`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; saveShift(id); }
+
+// ---------- Wages: full breakdown, editable, deletable ----------
+async function loadWages(){
+  const d=await fetch('/api/admin/wages',{headers:hdr()}).then(r=>r.json());
+  const cur=d.currency;
+  let html=`<div class="row" style="margin:2px 4px 12px"><h3 style="margin:0">💰 Wages owing — full breakdown</h3></div>
+    <div class="kpi">
+      <div class="card"><b>${cur}${d.totals.pay.toFixed(2)}</b><span>total owing</span></div>
+      <div class="card"><b>${d.totals.hours.toFixed(1)}h</b><span>total hours</span></div>
+      <div class="card"><b style="color:${d.totals.suspects?'var(--red)':'inherit'}">${d.totals.suspects}</b><span>need checking</span></div>
+    </div>`;
+  if(d.totals.suspects) html+=`<div class="card" style="border-color:var(--red);color:#ff9d9b">⚠️ ${d.totals.suspects} shift(s) look wrong — over 14 hours (a forgotten clock-out) or an accidental tap. They're marked red below. Fix the times, or <b>Delete</b> to take those wages off the bill.</div>`;
+  for(const w of d.workers){
+    html+=`<div class="card"><div class="row"><div class="name">${escapeHtml(w.name)} <span class="sub">${cur}${w.rate}/h</span></div>
+      <div style="text-align:right"><b style="font-size:19px">${cur}${w.pay.toFixed(2)}</b><div class="sub">${w.hours.toFixed(2)}h · ${w.shifts.length} shifts</div></div></div>
+      <details style="margin-top:10px"><summary style="color:var(--blue);cursor:pointer">Show ${w.shifts.length} shifts</summary>`;
+    for(const s of w.shifts){
+      const day=new Date(s.clockIn).toLocaleDateString([], {weekday:'short', day:'numeric', month:'short'});
+      html+=`<div style="border-top:1px solid var(--line);padding:10px 0;${s.suspect?'background:rgba(240,82,79,.08)':''}">
+        <div class="row"><div><b>${day}</b> ${s.suspect?'<span class="badge" style="background:rgba(240,82,79,.25);color:#ff9d9b">⚠️ check</span>':''}
+          ${s.place?`<span class="pill" style="background:rgba(31,122,77,.2);color:#7fe6b8">📍 ${escapeHtml(s.place)}</span>`:''}</div>
+          <div style="text-align:right"><b>${cur}${s.pay.toFixed(2)}</b><div class="sub">${s.hours.toFixed(2)}h</div></div></div>
+        <div class="grid2" style="margin-top:8px">
+          <div><label style="margin:0 0 4px">In</label><input id="wci_${s.shiftId}" type="datetime-local" value="${toLocalInput(s.clockIn)}"></div>
+          <div><label style="margin:0 0 4px">Out ${s.open?'<span style="color:var(--amber)">— still open</span>':''}</label><input id="wco_${s.shiftId}" type="datetime-local" value="${toLocalInput(s.clockOut)}"></div>
+        </div>
+        <div class="row" style="margin-top:8px;justify-content:flex-end;gap:8px">
+          <button class="btn red small" onclick="deleteShift(${s.shiftId})">Delete</button>
+          <button class="btn brand small" onclick="saveWageShift(${s.shiftId},event)">Save</button></div>
+      </div>`;
+    }
+    html+=`</details></div>`;
+  }
+  $('tab-wages').innerHTML=html;
+}
+async function saveWageShift(id,ev){
+  const ci=$('wci_'+id).value, co=$('wco_'+id).value;
+  if(!ci){ alert('Clock-in time is required'); return; }
+  const r=await fetch('/api/admin/shifts/'+id,{method:'POST',headers:hdr(),body:JSON.stringify({clockInMs:new Date(ci).getTime(), clockOutMs: co?new Date(co).getTime():null})});
+  if(!r.ok){ const e=await r.json().catch(()=>({})); alert(e.error||'Could not save'); return; }
+  if(ev&&ev.target) ev.target.textContent='Saved ✓';
+  loadWages();
+}
+async function deleteShift(id){
+  if(!confirm('Delete this shift completely? Its wages come off the bill. This cannot be undone.')) return;
+  await fetch('/api/admin/shifts/'+id+'/delete',{method:'POST',headers:hdr(),body:'{}'});
+  loadWages();
+}
 
 // ---------- Schedule ----------
 async function loadSchedule(){

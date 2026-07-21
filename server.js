@@ -660,6 +660,37 @@ app.get('/api/admin/today', requireAdmin, (req, res) => {
   res.json({ date: dateStr, currency, rows: out, totals: { hours: +totHours.toFixed(2), pay: +totPay.toFixed(2), openCount } });
 });
 
+// ---- full wages report (all time, per worker, per shift) ----
+app.get('/api/admin/wages', requireAdmin, (req, res) => {
+  const now = Date.now();
+  const currency = getSetting('currency');
+  const workers = db.prepare('SELECT id, name, hourly_rate FROM workers ORDER BY sort_order, name').all();
+  let grandHours = 0, grandPay = 0, suspects = 0;
+  const out = workers.map((w) => {
+    const rate = workerRate(w);
+    const shifts = db.prepare('SELECT * FROM shifts WHERE worker_id = ? ORDER BY clock_in').all(w.id).map((s) => {
+      const end = s.clock_out || now;
+      const hours = Math.max(0, (end - s.clock_in) / 3600000);
+      // flag impossible shifts: longer than 14h, or an accidental tap under 5 minutes
+      const suspect = hours > 14 || hours < 0.08;
+      if (suspect) suspects++;
+      return { shiftId: s.id, clockIn: s.clock_in, clockOut: s.clock_out, open: !s.clock_out,
+        place: s.place || null, hours: +hours.toFixed(2), pay: +(hours * rate).toFixed(2), suspect };
+    });
+    const hours = shifts.reduce((a, b) => a + b.hours, 0);
+    const pay = shifts.reduce((a, b) => a + b.pay, 0);
+    grandHours += hours; grandPay += pay;
+    return { id: w.id, name: w.name, rate, shifts, hours: +hours.toFixed(2), pay: +pay.toFixed(2) };
+  }).filter((w) => w.shifts.length);
+  res.json({ currency, workers: out, totals: { hours: +grandHours.toFixed(2), pay: +grandPay.toFixed(2), suspects } });
+});
+
+// Remove a shift entirely (takes its wages off the bill).
+app.post('/api/admin/shifts/:id/delete', requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM shifts WHERE id = ?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
 // Owner edits a shift's clock-in / clock-out (epoch ms from the browser).
 app.post('/api/admin/shifts/:id', requireAdmin, (req, res) => {
   const shift = db.prepare('SELECT * FROM shifts WHERE id = ?').get(Number(req.params.id));
