@@ -686,9 +686,23 @@ app.get('/api/admin/wages', requireAdmin, (req, res) => {
 });
 
 // Remove a shift entirely (takes its wages off the bill).
+// Cascades: a shift's jobs (and any penalties on them) must go first, or the
+// foreign key blocks the delete.
 app.post('/api/admin/shifts/:id/delete', requireAdmin, (req, res) => {
-  db.prepare('DELETE FROM shifts WHERE id = ?').run(Number(req.params.id));
-  res.json({ ok: true });
+  const id = Number(req.params.id);
+  try {
+    const jobIds = db.prepare('SELECT id FROM jobs WHERE shift_id = ?').all(id).map((j) => j.id);
+    for (const jid of jobIds) {
+      db.prepare('DELETE FROM penalties WHERE job_id = ?').run(jid);
+      db.prepare("UPDATE assignments SET job_id = NULL, status = 'assigned' WHERE job_id = ?").run(jid);
+    }
+    db.prepare('DELETE FROM jobs WHERE shift_id = ?').run(id);
+    db.prepare('DELETE FROM shifts WHERE id = ?').run(id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('shift delete failed', e.message);
+    res.status(500).json({ error: 'Could not delete: ' + e.message });
+  }
 });
 
 // Owner edits a shift's clock-in / clock-out (epoch ms from the browser).
