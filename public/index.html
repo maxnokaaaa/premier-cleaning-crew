@@ -128,7 +128,11 @@ function getGPS(){
   });
 }
 
+let clientList=[];
+async function loadClients(){ try{ clientList=await fetch('/api/clients').then(r=>r.json()); }catch(e){ clientList=[]; } }
+
 async function boot(){
+  await loadClients();
   const cfg = await fetch('/api/config').then(r=>r.json()).catch(()=>({}));
   if(cfg.businessName){ $('bizName').textContent=cfg.businessName; document.title=cfg.businessName; }
   if(cfg.brandColor) document.documentElement.style.setProperty('--brand', cfg.brandColor);
@@ -190,6 +194,7 @@ async function updatePlace(){
 }
 async function clockIn(){
   const place=($('placeInput')&&$('placeInput').value.trim())||'';
+  if(!place){ toast('Choose your client / job first — you can\'t clock in without it'); return; }
   await act('/api/clock-in',{place});
   setupPush();
 }
@@ -257,7 +262,16 @@ function renderActions(d){
   box.innerHTML='';
   const add=(label,cls,fn)=>{ const b=document.createElement('button'); b.className='btn '+cls; b.textContent=label; b.onclick=fn; box.appendChild(b); };
   if(d.state==='off'){
-    box.insertAdjacentHTML('beforeend',`<input id="placeInput" value="${prevPlace.replace(/"/g,'&quot;')}" placeholder="Where are you working today? (e.g. Tonio, Mellieħa)" style="width:100%;padding:16px;border-radius:14px;border:1px solid var(--line);background:var(--card);color:var(--text);font-size:16px;margin:12px 0 0" />`);
+    // Client tagging is mandatory — pick the job before you can clock in.
+    const cal=(d.calendarJobs||[]).map(j=>j.client||j.title).filter(Boolean);
+    const names=[...new Set([...cal, ...clientList.map(c=>c.name)])];
+    const opts=names.map(n=>`<option value="${n.replace(/"/g,'&quot;')}" ${n===prevPlace?'selected':''}>${escapeHtml(n)}</option>`).join('');
+    box.insertAdjacentHTML('beforeend',
+      `<div class="section-title" style="margin:12px 4px 6px">Which job are you on today?</div>
+       <select id="placeInput" style="width:100%;padding:16px;border-radius:14px;border:1px solid var(--line);background:var(--card);color:var(--text);font-size:16px">
+         <option value="">— choose your client / job —</option>${opts}
+       </select>
+       ${names.length?'':'<p class="sub" style="margin:8px 4px 0">No clients set up yet — ask your manager to add them.</p>'}`);
     add('🟢  Clock In','brand', clockIn);
     return;
   }

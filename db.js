@@ -134,6 +134,14 @@ db.exec(`
     read_at         INTEGER NOT NULL
   );
 
+  -- Clients / sites the crew can be working at. Workers must pick one to clock in.
+  CREATE TABLE IF NOT EXISTS clients (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    active     INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+  );
+
   -- Web-push subscriptions so we can send notifications to a worker's phone.
   CREATE TABLE IF NOT EXISTS push_subscriptions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -381,9 +381,17 @@ async function loadLog(){
 
 // ---------- Workers ----------
 async function loadWorkers(){
-  const list=await fetch('/api/admin/workers',{headers:hdr()}).then(r=>r.json());
+  const [list, clients]=await Promise.all([
+    fetch('/api/admin/workers',{headers:hdr()}).then(r=>r.json()),
+    fetch('/api/clients').then(r=>r.json()).catch(()=>[]),
+  ]);
   const cur=(settingsCache&&settingsCache.currency)||'€';
-  let html=`<div class="card"><label>Add a worker</label><div class="row"><input id="newWorker" placeholder="Full name"><button class="btn brand" onclick="addWorker()">Add</button></div></div>
+  let html=`<div class="card" style="border-color:var(--brand)"><h3>🏠 Clients / sites — workers MUST pick one to clock in</h3>
+    <p class="muted" style="margin-top:0">Nobody can start their day without choosing a job from this list (plus that day's calendar jobs). This is what ties every hour to a client.</p>
+    <div class="row"><input id="newClient" placeholder="Client or site name (e.g. Tonio — Mellieħa)"><button class="btn brand" onclick="addClient()">Add</button></div>
+    <div style="margin-top:12px">${clients.length?clients.map(c=>`<span class="pill" style="background:var(--card2);color:var(--text);display:inline-block;margin:0 6px 6px 0;padding:7px 12px">${escapeHtml(c.name)} <a href="javascript:void(0)" onclick="removeClient(${c.id})" style="color:var(--red);text-decoration:none">✕</a></span>`).join(''):'<span class="muted">No clients yet — add your regulars so the crew can tag their hours.</span>'}</div>
+  </div>
+  <div class="card"><label>Add a worker</label><div class="row"><input id="newWorker" placeholder="Full name"><button class="btn brand" onclick="addWorker()">Add</button></div></div>
     <h3>Your crew &nbsp;<span class="muted" style="font-weight:400">set each person's hourly rate</span></h3>`;
   if(!list.length) html+=`<div class="card muted">No workers yet.</div>`;
   for(const w of list) html+=`<div class="card"><div class="row"><div class="row" style="gap:10px"><span style="width:34px;height:34px;border-radius:50%;background:var(--brand);display:grid;place-items:center;font-weight:700">${initials(w.name)}</span><b>${escapeHtml(w.name)}</b></div>
@@ -393,6 +401,8 @@ async function loadWorkers(){
   $('tab-workers').innerHTML=html;
 }
 async function saveRate(id,ev){ const rate=$('rate_'+id).value; await fetch('/api/admin/workers/'+id+'/rate',{method:'POST',headers:hdr(),body:JSON.stringify({rate})}); if(ev&&ev.target){ ev.target.textContent='Saved ✓'; setTimeout(()=>{if(ev.target)ev.target.textContent='Save';},1500); } }
+async function addClient(){ const name=$('newClient').value.trim(); if(!name) return; await fetch('/api/admin/clients',{method:'POST',headers:hdr(),body:JSON.stringify({name})}); loadWorkers(); }
+async function removeClient(id){ if(!confirm('Remove this client from the list?')) return; await fetch('/api/admin/clients/'+id+'/remove',{method:'POST',headers:hdr(),body:'{}'}); loadWorkers(); }
 async function addWorker(){ const name=$('newWorker').value.trim(); if(!name) return; await fetch('/api/admin/workers',{method:'POST',headers:hdr(),body:JSON.stringify({name})}); loadWorkers(); }
 async function removeWorker(id,name){ if(!confirm('Remove '+name+'? Past records are kept.')) return; await fetch(`/api/admin/workers/${id}/remove`,{method:'POST',headers:hdr(),body:'{}'}); loadWorkers(); }
 

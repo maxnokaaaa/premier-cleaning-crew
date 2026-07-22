@@ -291,12 +291,29 @@ app.get('/api/me/:id', async (req, res) => {
   });
 });
 
+// Clients / sites — workers must pick one to clock in.
+app.get('/api/clients', (req, res) => {
+  res.json(db.prepare('SELECT id, name FROM clients WHERE active = 1 ORDER BY name').all());
+});
+app.post('/api/admin/clients', requireAdmin, (req, res) => {
+  const name = (req.body.name || '').toString().trim().slice(0, 80);
+  if (!name) return res.status(400).json({ error: 'name required' });
+  db.prepare('INSERT INTO clients (name, active, created_at) VALUES (?,1,?)').run(name, Date.now());
+  res.json({ ok: true });
+});
+app.post('/api/admin/clients/:id/remove', requireAdmin, (req, res) => {
+  db.prepare('UPDATE clients SET active = 0 WHERE id = ?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
 app.post('/api/clock-in', (req, res) => {
   const id = Number(req.body.workerId);
-  const place = (req.body.place || '').toString().trim().slice(0, 120) || null;
+  const place = (req.body.place || '').toString().trim().slice(0, 120);
+  // Client tagging is mandatory: no job selected, no clock-in.
+  if (!place) return res.status(400).json({ error: 'place', reason: 'Choose the client / job you are working on before clocking in.' });
   const existing = openShiftFor.get(id);
   if (!existing) db.prepare('INSERT INTO shifts (worker_id, clock_in, place) VALUES (?, ?, ?)').run(id, Date.now(), place);
-  else if (place) db.prepare('UPDATE shifts SET place = ? WHERE id = ?').run(place, existing.id);
+  else db.prepare('UPDATE shifts SET place = ? WHERE id = ?').run(place, existing.id);
   recordLocation(id, req.body, 'clock_in');
   res.json({ ok: true });
 });
