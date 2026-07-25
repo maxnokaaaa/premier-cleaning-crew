@@ -14,6 +14,16 @@ const { db } = require('./db');
 
 const app = express();
 app.use(express.json({ limit: '20mb' })); // room for base64 photos
+// Never leak a stack trace to a phone: turn body-parser/JSON errors into clean JSON.
+app.use((err, req, res, next) => {
+  if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError)) {
+    return res.status(400).json({ error: 'bad_request', reason: 'Something went wrong sending that — please try again.' });
+  }
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'too_large', reason: 'That photo is too big — try taking it again.' });
+  }
+  return next(err);
+});
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -340,6 +350,24 @@ app.post('/api/clock-in', (req, res) => {
     buildChecklist(shift.id);
   }
   recordLocation(id, req.body, 'clock_in');
+  res.json({ ok: true });
+});
+
+// Set (or change) the clean type on an already-open shift and build its checklist.
+// Covers shifts started before the checklist existed, and genuine mid-shift changes.
+app.post('/api/shift-service', (req, res) => {
+  const id = Number(req.body.workerId);
+  const type = (req.body.serviceType || '').toString().trim();
+  if (!SERVICE_TYPES[type]) return res.status(400).json({ error: 'service', reason: 'Pick a valid type of clean.' });
+  const shift = openShiftFor.get(id);
+  if (!shift) return res.status(400).json({ error: 'not clocked in' });
+  db.prepare('UPDATE shifts SET service_type = ? WHERE id = ?').run(type, shift.id);
+  // rebuild the checklist for the new type, keeping nothing stale behind
+  db.prepare('DELETE FROM shift_checklist_items WHERE shift_id = ?').run(shift.id);
+  let i = 0;
+  for (const text of templateFor(type)) {
+    db.prepare('INSERT INTO shift_checklist_items (shift_id, text, sort_order) VALUES (?,?,?)').run(shift.id, text.slice(0, 120), i++);
+  }
   res.json({ ok: true });
 });
 
@@ -716,7 +744,7 @@ app.get('/api/admin/today', requireAdmin, (req, res) => {
   const currency = getSetting('currency');
   const now = Date.now();
   const rows = db.prepare(
-    `SELECT s.id AS shiftId, s.worker_id, s.clock_in, s.clock_out, s.place, w.name, w.hourly_rate
+    `SELECT s.id AS shiftId, s.worker_id, s.clock_in, s.clock_out, s.place, s.service_type, w.name, w.hourly_rate
      FROM shifts s JOIN workers w ON w.id = s.worker_id
      WHERE s.clock_in >= ? AND s.clock_in < ? ORDER BY s.clock_in`
   ).all(dayStart, dayEnd);
@@ -728,7 +756,11 @@ app.get('/api/admin/today', requireAdmin, (req, res) => {
     const pay = rate * hours;
     if (!r.clock_out) openCount++;
     totHours += hours; totPay += pay;
+    const cl = shiftChecklist(r.shiftId);
+    const photos = db.prepare('SELECT COUNT(*) AS n FROM photos WHERE shift_id = ?').get(r.shiftId).n;
     return { shiftId: r.shiftId, workerId: r.worker_id, name: r.name, rate, place: r.place || null,
+      serviceLabel: SERVICE_TYPES[r.service_type] || null,
+      checklistDone: cl.filter((c) => c.done).length, checklistTotal: cl.length, photos,
       clockIn: r.clock_in, clockOut: r.clock_out, open: !r.clock_out, hours: +hours.toFixed(2), pay: +pay.toFixed(2) };
   });
   res.json({ date: dateStr, currency, rows: out, totals: { hours: +totHours.toFixed(2), pay: +totPay.toFixed(2), openCount } });
@@ -748,8 +780,12 @@ app.get('/api/admin/wages', requireAdmin, (req, res) => {
       // flag impossible shifts: longer than 14h, or an accidental tap under 5 minutes
       const suspect = hours > 14 || hours < 0.08;
       if (suspect) suspects++;
+      const cl = shiftChecklist(s.id);
+      const photoN = db.prepare('SELECT COUNT(*) AS n FROM photos WHERE shift_id = ?').get(s.id).n;
       return { shiftId: s.id, clockIn: s.clock_in, clockOut: s.clock_out, open: !s.clock_out,
-        place: s.place || null, hours: +hours.toFixed(2), pay: +(hours * rate).toFixed(2), suspect };
+        place: s.place || null, serviceLabel: SERVICE_TYPES[s.service_type] || null,
+        checklistDone: cl.filter((c) => c.done).length, checklistTotal: cl.length, photos: photoN,
+        hours: +hours.toFixed(2), pay: +(hours * rate).toFixed(2), suspect };
     });
     const hours = shifts.reduce((a, b) => a + b.hours, 0);
     const pay = shifts.reduce((a, b) => a + b.pay, 0);
@@ -807,6 +843,13 @@ app.post('/api/admin/shifts/:id', requireAdmin, (req, res) => {
 });
 
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
+
+// Catch-all: any unexpected error returns clean JSON, never a stack trace.
+app.use((err, req, res, next) => {
+  console.error('Unhandled error on', req.method, req.path, '—', err.message);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'server', reason: 'Something went wrong. Try again — if it keeps happening tell Max.' });
+});
 
 // ---------- Bot bookings mirrored into the calendar ----------
 // The WhatsApp bot upserts EVERY booking here (ref "pcm-<id>") so the

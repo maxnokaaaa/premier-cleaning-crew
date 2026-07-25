@@ -212,17 +212,63 @@ async function clockIn(){
 async function toggleShiftCheck(id,done){ await fetch('/api/shift-check/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({done})}); refresh(); }
 async function saveNotes(){ const n=$('shiftNotes')?$('shiftNotes').value:''; await fetch('/api/shift-notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workerId:me.id, notes:n})}); }
 function takeShiftPhoto(){ takePhoto(null); } // null assignment → server attaches it to the open shift
+async function shareShiftPhotos(){
+  const sh=lastData&&lastData.currentShift;
+  if(!sh||!sh.photos.length){ toast('Add photos first'); return; }
+  try{
+    toast('Preparing photos…');
+    const files=[];
+    for(let i=0;i<sh.photos.length;i++){
+      const blob=await fetch(sh.photos[i].url).then(r=>r.blob());
+      files.push(new File([blob], `job-photo-${i+1}.jpg`, {type: blob.type||'image/jpeg'}));
+    }
+    const text=`${me.name} — ${lastData.place||''}${sh.serviceLabel?' ('+sh.serviceLabel+')':''} — Premier Cleaning`;
+    if(navigator.canShare && navigator.canShare({files})){
+      await navigator.share({files, text, title:'Premier Cleaning — job photos'});
+    } else if(navigator.share){
+      await navigator.share({text, title:'Premier Cleaning — job photos'});
+      toast('Pick the photos from your gallery to attach');
+    } else {
+      toast('Open WhatsApp and attach the photos from your gallery');
+    }
+  }catch(e){ /* user cancelled the share sheet */ }
+}
+function changeType(){
+  const svc=(lastData&&lastData.serviceTypes)||{standard:'Standard clean',deep:'Deep clean',postconstruction:'Post-construction',airbnb:'Airbnb turnover'};
+  const keys=Object.keys(svc);
+  const pick=prompt('Type of clean:\n'+keys.map((k,i)=>`${i+1}. ${svc[k]}`).join('\n')+'\n\nEnter 1-'+keys.length);
+  const n=parseInt(pick,10);
+  if(n>=1 && n<=keys.length){
+    if(confirm('Change to "'+svc[keys[n-1]]+'"? This resets your checklist.')) setShiftService(keys[n-1]);
+  }
+}
+async function setShiftService(k){
+  await fetch('/api/shift-service',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workerId:me.id, serviceType:k})});
+  refresh();
+}
 function renderShiftJob(d){
   const box=$('shiftJob'); const sh=d.currentShift;
   if(d.state==='off' || !sh){ box.innerHTML=''; return; }
   const cl=sh.checklist||[]; const done=cl.filter(c=>c.done).length; const allDone=cl.length && done===cl.length;
+  // No clean type yet (shift started before the checklist, or needs changing) → make them pick.
+  if(!cl.length){
+    const svc=d.serviceTypes||{standard:'Standard clean',deep:'Deep clean',postconstruction:'Post-construction',airbnb:'Airbnb turnover'};
+    box.innerHTML=`<div class="section-title">✅ Job checklist</div><div class="job active">
+      <h3 style="margin:0 0 4px">📍 ${escapeHtml(d.place||'This job')}</h3>
+      <div class="sub" style="margin-bottom:10px">Pick the type of clean to load your checklist.</div>
+      <div class="svcgrid">${Object.entries(svc).map(([k,l])=>`<button type="button" class="svcbtn" onclick="setShiftService('${k}')">${escapeHtml(l)}</button>`).join('')}</div>
+    </div>`;
+    return;
+  }
   let h=`<div class="section-title">✅ Job checklist${sh.serviceLabel?' — '+escapeHtml(sh.serviceLabel):''}</div><div class="job active">`;
   h+=`<div class="row" style="margin-bottom:4px"><h3 style="margin:0">📍 ${escapeHtml(d.place||'This job')}</h3><span class="badge ${allDone?'b-done':'b-progress'}">${done}/${cl.length}${allDone?' ✓':''}</span></div>`;
+  h+=`<div class="sub" style="margin-bottom:8px">${escapeHtml(sh.serviceLabel||'')} · <a href="javascript:void(0)" onclick="changeType()" style="color:var(--blue)">change type</a></div>`;
   if(cl.length && !allDone && d.requireShiftChecklist) h+=`<div class="sub" style="margin-bottom:8px">Tick every box — you can't clock out until it's all done.</div>`;
   for(const c of cl) h+=`<div class="check ${c.done?'on':''}" onclick="toggleShiftCheck(${c.id},${c.done?0:1})"><div class="box">${c.done?'✓':''}</div><span>${escapeHtml(c.text)}</span></div>`;
   h+=`<div class="section-title" style="margin-top:14px">📷 Before & after photos</div><div class="photos">`;
   for(const p of sh.photos) h+=`<img src="${p.url}">`;
   h+=`<button class="btn ghost" style="width:auto;margin:0;padding:12px 16px" onclick="takeShiftPhoto()">📷 Add photo</button></div>`;
+  if(sh.photos.length) h+=`<button class="btn green" style="margin-top:10px" onclick="shareShiftPhotos()">📤 Send photos to team WhatsApp</button>`;
   h+=`<div class="section-title" style="margin-top:14px">📝 Client / property details</div>`;
   h+=`<textarea id="shiftNotes" onblur="saveNotes()" placeholder="Access, key location, condition, special requests…" class="field" style="background:var(--card2);min-height:56px;font-size:14px">${escapeHtml(sh.notes||'')}</textarea>`;
   box.innerHTML=h+`</div>`;
