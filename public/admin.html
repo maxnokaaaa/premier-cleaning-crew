@@ -143,6 +143,7 @@ async function loadLive(){
         <div class="sub"><span class="dot" style="background:${m.c}"></span>${m.txt} · ${c.jobsDoneScheduled}/${c.jobsScheduled} jobs · ${(c.summary.workedMinutes/60).toFixed(1).replace('.0','')}h</div></div>
       </div>
       <div style="text-align:right">${cd}<div>${penB}</div></div></div>
+      ${c.serviceLabel?`<div class="sub" style="margin-top:6px">🧹 <b style="color:var(--text)">${escapeHtml(c.serviceLabel)}</b>${c.checklist&&c.checklist.total?` · ✅ ${c.checklist.done}/${c.checklist.total} checklist${c.checklist.photos?` · 📷 ${c.checklist.photos}`:''}`:''}</div>`:''}
       <div style="margin-top:8px">${loc}</div></div>`;
   }
   $('tab-live').innerHTML=html; startTicks();
@@ -427,6 +428,15 @@ async function loadSettings(){
      <label style="display:flex;align-items:center;gap:10px;margin-top:8px"><input type="checkbox" id="setReqCheck" ${s.requireChecklist?'checked':''} style="width:auto"> Require all checklist items ticked before finishing</label>
      <button class="btn brand" style="margin-top:14px" onclick="saveSettings()">Save settings</button><span id="setMsg" class="muted" style="margin-left:10px"></span>
    </div>
+   <div class="card"><h3>✅ Job checklists (per clean type)</h3>
+     <p class="muted" style="margin-top:0">The checklist cleaners must complete on site — one item per line. With the box below ticked, <b>they cannot clock out until every item is done.</b></p>
+     <label style="display:flex;align-items:center;gap:10px;margin:0 0 12px"><input type="checkbox" id="setReqShiftCheck" ${s.requireShiftChecklist?'checked':''} style="width:auto"> Require the checklist to be finished before clocking out</label>
+     <label>Standard clean</label><textarea id="setClStandard" style="min-height:130px">${escapeHtml(s.checklistStandard||'')}</textarea>
+     <label>Deep clean</label><textarea id="setClDeep" style="min-height:130px">${escapeHtml(s.checklistDeep||'')}</textarea>
+     <label>Post-construction</label><textarea id="setClPost" style="min-height:130px">${escapeHtml(s.checklistPostconstruction||'')}</textarea>
+     <label>Airbnb turnover</label><textarea id="setClAirbnb" style="min-height:130px">${escapeHtml(s.checklistAirbnb||'')}</textarea>
+     <button class="btn brand" style="margin-top:12px" onclick="saveSettings()">Save checklists</button><span id="setMsg3" class="muted" style="margin-left:10px"></span>
+   </div>
    <div class="card"><h3>📅 Premier calendar link</h3>
      <p class="muted" style="margin-top:0">Paste your Premier calendar's <b>Secret address in iCal format</b> (Google Calendar → the calendar's Settings → "Integrate calendar"). Each day's jobs then appear automatically for your cleaners to pick.</p>
      <input id="setCal" placeholder="https://calendar.google.com/calendar/ical/.../basic.ics" value="${escapeHtml(s.calendarIcalUrl||'')}">
@@ -443,9 +453,14 @@ async function saveSettings(){
   const body={ travel_minutes:$('setTravel').value, penalty_hours:$('setPen').value, hourly_rate:$('setRate').value, currency:$('setCur').value,
     checkin_minutes:$('setCheckin')?$('setCheckin').value:undefined,
     business_name:$('setName').value, brand_color:$('setColor').value, require_photo:$('setReqPhoto').checked?1:0, require_checklist:$('setReqCheck').checked?1:0,
+    require_shift_checklist:$('setReqShiftCheck')?($('setReqShiftCheck').checked?1:0):undefined,
+    checklist_standard:$('setClStandard')?$('setClStandard').value:undefined,
+    checklist_deep:$('setClDeep')?$('setClDeep').value:undefined,
+    checklist_postconstruction:$('setClPost')?$('setClPost').value:undefined,
+    checklist_airbnb:$('setClAirbnb')?$('setClAirbnb').value:undefined,
     calendar_ical_url:$('setCal')?$('setCal').value.trim():undefined };
   await fetch('/api/admin/settings',{method:'POST',headers:hdr(),body:JSON.stringify(body)});
-  $('setMsg').textContent='Saved ✓'; if($('setMsg2'))$('setMsg2').textContent='Saved ✓'; document.documentElement.style.setProperty('--brand', body.brand_color); $('bizName').textContent=body.business_name;
+  $('setMsg').textContent='Saved ✓'; if($('setMsg2'))$('setMsg2').textContent='Saved ✓'; if($('setMsg3'))$('setMsg3').textContent='Saved ✓'; document.documentElement.style.setProperty('--brand', body.brand_color); $('bizName').textContent=body.business_name;
 }
 
 if(PIN){ enter(); } else { $('pin').focus(); }

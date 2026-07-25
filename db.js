@@ -142,6 +142,16 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
 
+  -- A quality checklist attached to a shift, generated from the service-type template.
+  CREATE TABLE IF NOT EXISTS shift_checklist_items (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    shift_id   INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    done       INTEGER NOT NULL DEFAULT 0,
+    done_at    INTEGER,
+    sort_order INTEGER NOT NULL DEFAULT 0
+  );
+
   -- Web-push subscriptions so we can send notifications to a worker's phone.
   CREATE TABLE IF NOT EXISTS push_subscriptions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,6 +182,16 @@ if (!shiftCols.includes('place')) {
 if (!shiftCols.includes('last_checkin')) {
   db.exec('ALTER TABLE shifts ADD COLUMN last_checkin INTEGER'); // last check-in push sent
 }
+if (!shiftCols.includes('service_type')) {
+  db.exec('ALTER TABLE shifts ADD COLUMN service_type TEXT'); // standard|deep|postconstruction|airbnb
+}
+if (!shiftCols.includes('notes')) {
+  db.exec('ALTER TABLE shifts ADD COLUMN notes TEXT'); // client / property details the cleaner fills in
+}
+const photoCols2 = db.prepare('PRAGMA table_info(photos)').all().map((c) => c.name);
+if (!photoCols2.includes('shift_id')) {
+  db.exec('ALTER TABLE photos ADD COLUMN shift_id INTEGER'); // photos can belong to a shift, not just an assignment
+}
 
 // Default settings (only inserted once).
 const DEFAULT_SETTINGS = {
@@ -185,6 +205,68 @@ const DEFAULT_SETTINGS = {
   require_checklist: '1', // must tick every checklist item before finishing
   calendar_ical_url: '',  // Premier calendar "Secret address in iCal format" — jobs flow in from here
   checkin_minutes: '30',  // how often to push a "still on the job?" check-in while clocked in (0 = off)
+  require_shift_checklist: '1', // must complete the checklist before clocking out
+  checklist_standard: [
+    'Kitchen surfaces & sink cleaned',
+    'Hob & outside of appliances wiped',
+    'All bathrooms — toilet, shower/bath, sink, mirror',
+    'Dust all surfaces & furniture',
+    'Floors vacuumed and mopped',
+    'Mirrors & glass cleaned',
+    'Bins emptied & fresh bags',
+    'Beds made / rooms tidied',
+    'Before photos taken',
+    'After photos taken',
+    'Final walk-through done',
+  ].join('\n'),
+  checklist_deep: [
+    'Kitchen surfaces, sink & tiles cleaned',
+    'Inside oven cleaned',
+    'Inside fridge / freezer cleaned',
+    'Outside of all appliances',
+    'Bathrooms — toilet, shower, bath, sink, taps',
+    'Limescale removed (taps, shower screen)',
+    'Interior windows & sills',
+    'Skirting boards & door frames',
+    'Cupboards wiped inside & out',
+    'Dust everywhere incl. high & low',
+    'Floors vacuumed & mopped',
+    'Bins emptied',
+    'Before photos taken',
+    'After photos taken',
+    'Final walk-through done',
+  ].join('\n'),
+  checklist_postconstruction: [
+    'Remove all dust, debris & builders\' rubble',
+    'Remove paint / plaster / adhesive spots',
+    'Wash all walls & ceilings as needed',
+    'Clean all windows, frames & sills (inside)',
+    'Deep clean floors — sweep, scrub, mop',
+    'Skirting boards, doors & frames',
+    'Kitchen — units inside & out, worktops',
+    'Bathrooms — full sanitise, grout, fixtures',
+    'Light fittings, switches & sockets wiped',
+    'Radiators & vents cleaned',
+    'Final dust pass (settles after first clean)',
+    'Before photos taken',
+    'After photos taken',
+    'Final walk-through done',
+  ].join('\n'),
+  checklist_airbnb: [
+    'All beds stripped & remade with fresh linen',
+    'Fresh towels laid out',
+    'Bathrooms sanitised — toilet, shower, sink',
+    'Kitchen reset & dishes done',
+    'Fridge cleared of guest leftovers',
+    'Consumables restocked (toilet roll, soap, coffee)',
+    'All bins emptied & taken out',
+    'Check for damage — report anything',
+    'Check for guest left-behind items',
+    'Floors vacuumed & mopped',
+    'Staging / welcome setup done',
+    'Before photos taken',
+    'After photos taken',
+  ].join('\n'),
 };
 const insertSetting = db.prepare(
   'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)'

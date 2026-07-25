@@ -69,6 +69,10 @@
   .back{background:none; border:0; color:var(--muted); font-size:15px; padding:10px 0; cursor:pointer;}
   .hidden{display:none;} .foot{text-align:center; color:var(--muted); font-size:12px; margin-top:26px;} a.adminlink{color:var(--muted);}
   .toast{position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#0b1220; border:1px solid var(--line); color:var(--text); padding:12px 18px; border-radius:12px; font-size:14px; box-shadow:0 8px 30px rgba(0,0,0,.5); z-index:50; max-width:90%;}
+  .svcgrid{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:4px;}
+  .svcbtn{padding:15px 10px; border-radius:13px; border:1px solid var(--line); background:var(--card); color:var(--text); font-size:15px; font-weight:600; cursor:pointer; text-align:center;}
+  .svcbtn.on{background:var(--brand); border-color:var(--brand); color:#fff;}
+  .field{width:100%; padding:14px; border-radius:13px; border:1px solid var(--line); background:var(--card); color:var(--text); font-size:16px; font-family:inherit;}
 </style>
 </head>
 <body>
@@ -97,6 +101,7 @@
     </div>
 
     <div id="actions"></div>
+    <div id="shiftJob"></div>
     <div id="currentJob"></div>
     <div id="jobList"></div>
 
@@ -192,11 +197,35 @@ async function updatePlace(){
   await fetch('/api/place',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workerId:me.id, place:p.trim()})});
   refresh();
 }
+let selectedService=null;
+function pickService(k){ selectedService=k; document.querySelectorAll('.svcbtn').forEach(b=>b.classList.toggle('on', b.dataset.svc===k)); }
 async function clockIn(){
   const place=($('placeInput')&&$('placeInput').value.trim())||'';
-  if(!place){ toast('Choose your client / job first — you can\'t clock in without it'); return; }
-  await act('/api/clock-in',{place});
+  if(!place){ toast('Choose your client / job first'); return; }
+  if(!selectedService){ toast('Pick the type of clean (deep, standard, post-construction or Airbnb)'); return; }
+  const notes=($('notesInput')&&$('notesInput').value.trim())||'';
+  await act('/api/clock-in',{place, serviceType:selectedService, notes});
   setupPush();
+}
+
+// ---- shift checklist (the compulsory quality checklist for the whole shift) ----
+async function toggleShiftCheck(id,done){ await fetch('/api/shift-check/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({done})}); refresh(); }
+async function saveNotes(){ const n=$('shiftNotes')?$('shiftNotes').value:''; await fetch('/api/shift-notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workerId:me.id, notes:n})}); }
+function takeShiftPhoto(){ takePhoto(null); } // null assignment → server attaches it to the open shift
+function renderShiftJob(d){
+  const box=$('shiftJob'); const sh=d.currentShift;
+  if(d.state==='off' || !sh){ box.innerHTML=''; return; }
+  const cl=sh.checklist||[]; const done=cl.filter(c=>c.done).length; const allDone=cl.length && done===cl.length;
+  let h=`<div class="section-title">✅ Job checklist${sh.serviceLabel?' — '+escapeHtml(sh.serviceLabel):''}</div><div class="job active">`;
+  h+=`<div class="row" style="margin-bottom:4px"><h3 style="margin:0">📍 ${escapeHtml(d.place||'This job')}</h3><span class="badge ${allDone?'b-done':'b-progress'}">${done}/${cl.length}${allDone?' ✓':''}</span></div>`;
+  if(cl.length && !allDone && d.requireShiftChecklist) h+=`<div class="sub" style="margin-bottom:8px">Tick every box — you can't clock out until it's all done.</div>`;
+  for(const c of cl) h+=`<div class="check ${c.done?'on':''}" onclick="toggleShiftCheck(${c.id},${c.done?0:1})"><div class="box">${c.done?'✓':''}</div><span>${escapeHtml(c.text)}</span></div>`;
+  h+=`<div class="section-title" style="margin-top:14px">📷 Before & after photos</div><div class="photos">`;
+  for(const p of sh.photos) h+=`<img src="${p.url}">`;
+  h+=`<button class="btn ghost" style="width:auto;margin:0;padding:12px 16px" onclick="takeShiftPhoto()">📷 Add photo</button></div>`;
+  h+=`<div class="section-title" style="margin-top:14px">📝 Client / property details</div>`;
+  h+=`<textarea id="shiftNotes" onblur="saveNotes()" placeholder="Access, key location, condition, special requests…" class="field" style="background:var(--card2);min-height:56px;font-size:14px">${escapeHtml(sh.notes||'')}</textarea>`;
+  box.innerHTML=h+`</div>`;
 }
 
 async function act(path, extra){
@@ -235,6 +264,7 @@ async function refresh(){
   (d.calendarJobs||[]).forEach(j=>window._calJobs[j.uid]=j);
   renderAnnounce(d.announcement);
   renderActions(d);
+  renderShiftJob(d);
   renderCurrentJob(d);
   renderJobList(d);
 }
@@ -258,21 +288,26 @@ async function readAnn(id){ await fetch('/api/announcement/'+id+'/read',{method:
 
 function renderActions(d){
   const box=$('actions');
-  const prevPlace=($('placeInput')&&$('placeInput').value)||''; // keep what they've typed across auto-refreshes
+  const prevPlace=($('placeInput')&&$('placeInput').value)||''; // keep what they've picked across auto-refreshes
+  const prevNotes=($('notesInput')&&$('notesInput').value)||'';
   box.innerHTML='';
   const add=(label,cls,fn)=>{ const b=document.createElement('button'); b.className='btn '+cls; b.textContent=label; b.onclick=fn; box.appendChild(b); };
   if(d.state==='off'){
-    // Client tagging is mandatory — pick the job before you can clock in.
+    // Compulsory before clocking in: pick client, pick clean type. This is arrival + accountability.
     const cal=(d.calendarJobs||[]).map(j=>j.client||j.title).filter(Boolean);
     const names=[...new Set([...cal, ...clientList.map(c=>c.name)])];
     const opts=names.map(n=>`<option value="${n.replace(/"/g,'&quot;')}" ${n===prevPlace?'selected':''}>${escapeHtml(n)}</option>`).join('');
+    const svc=d.serviceTypes||{standard:'Standard clean',deep:'Deep clean',postconstruction:'Post-construction',airbnb:'Airbnb turnover'};
+    const svcBtns=Object.entries(svc).map(([k,l])=>`<button type="button" class="svcbtn ${selectedService===k?'on':''}" data-svc="${k}" onclick="pickService('${k}')">${escapeHtml(l)}</button>`).join('');
     box.insertAdjacentHTML('beforeend',
-      `<div class="section-title" style="margin:12px 4px 6px">Which job are you on today?</div>
-       <select id="placeInput" style="width:100%;padding:16px;border-radius:14px;border:1px solid var(--line);background:var(--card);color:var(--text);font-size:16px">
-         <option value="">— choose your client / job —</option>${opts}
-       </select>
-       ${names.length?'':'<p class="sub" style="margin:8px 4px 0">No clients set up yet — ask your manager to add them.</p>'}`);
-    add('🟢  Clock In','brand', clockIn);
+      `<div class="section-title" style="margin:14px 4px 6px">1 · Which client / job?</div>
+       <select id="placeInput" class="field"><option value="">— choose your client / job —</option>${opts}</select>
+       ${names.length?'':'<p class="sub" style="margin:8px 4px 0">No clients set up yet — ask your manager to add them.</p>'}
+       <div class="section-title" style="margin:16px 4px 6px">2 · Type of clean</div>
+       <div class="svcgrid">${svcBtns}</div>
+       <div class="section-title" style="margin:16px 4px 6px">3 · Client / property details <span style="text-transform:none">(access, condition…)</span></div>
+       <textarea id="notesInput" class="field" style="min-height:56px" placeholder="Key under the mat, dog friendly, focus on kitchen…">${escapeHtml(prevNotes)}</textarea>`);
+    add('🟢  Clock In — I\'ve arrived','brand', clockIn);
     return;
   }
   // on shift: show where they're working + let them change it

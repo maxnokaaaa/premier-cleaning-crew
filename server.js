@@ -31,6 +31,10 @@ const setSetting = db.prepare(
 const travelMs = () => Number(getSetting('travel_minutes')) * 60 * 1000;
 const penaltyHours = () => Number(getSetting('penalty_hours'));
 const brand = () => ({ businessName: getSetting('business_name'), brandColor: getSetting('brand_color') });
+const SERVICE_TYPES = { standard: 'Standard clean', deep: 'Deep clean', postconstruction: 'Post-construction', airbnb: 'Airbnb turnover' };
+const templateFor = (type) => (getSetting('checklist_' + type) || '').split('\n').map((s) => s.trim()).filter(Boolean);
+const shiftChecklist = (sid) => db.prepare('SELECT id, text, done FROM shift_checklist_items WHERE shift_id = ? ORDER BY sort_order, id').all(sid);
+const shiftPhotos = (sid) => db.prepare('SELECT id, filename, created_at FROM photos WHERE shift_id = ? ORDER BY created_at').all(sid).map((p) => ({ id: p.id, url: `/uploads/${p.filename}`, at: p.created_at }));
 // A worker's own rate if set, else the global default.
 const workerRate = (w) => {
   const r = (w.hourly_rate !== null && w.hourly_rate !== undefined && w.hourly_rate !== '') ? Number(w.hourly_rate) : Number(getSetting('hourly_rate'));
@@ -283,6 +287,14 @@ app.get('/api/me/:id', async (req, res) => {
     requirePhoto: getSetting('require_photo') === '1',
     requireChecklist: getSetting('require_checklist') === '1',
     place: st.shift ? st.shift.place : null,
+    currentShift: st.shift ? {
+      id: st.shift.id, serviceType: st.shift.service_type || null,
+      serviceLabel: SERVICE_TYPES[st.shift.service_type] || null,
+      notes: st.shift.notes || null,
+      checklist: shiftChecklist(st.shift.id), photos: shiftPhotos(st.shift.id),
+    } : null,
+    requireShiftChecklist: getSetting('require_shift_checklist') === '1',
+    serviceTypes: SERVICE_TYPES,
     checkinMinutes: Number(getSetting('checkin_minutes')),
     vapidPublic: VAPID_PUBLIC,
     summary: todaySummary(id),
@@ -309,12 +321,38 @@ app.post('/api/admin/clients/:id/remove', requireAdmin, (req, res) => {
 app.post('/api/clock-in', (req, res) => {
   const id = Number(req.body.workerId);
   const place = (req.body.place || '').toString().trim().slice(0, 120);
-  // Client tagging is mandatory: no job selected, no clock-in.
+  const serviceType = (req.body.serviceType || '').toString().trim();
+  const notes = (req.body.notes || '').toString().trim().slice(0, 500) || null;
+  // Mandatory: no client and no clean-type, no clock-in (this is arrival + accountability).
   if (!place) return res.status(400).json({ error: 'place', reason: 'Choose the client / job you are working on before clocking in.' });
-  const existing = openShiftFor.get(id);
-  if (!existing) db.prepare('INSERT INTO shifts (worker_id, clock_in, place) VALUES (?, ?, ?)').run(id, Date.now(), place);
-  else db.prepare('UPDATE shifts SET place = ? WHERE id = ?').run(place, existing.id);
+  if (!SERVICE_TYPES[serviceType]) return res.status(400).json({ error: 'service', reason: 'Choose the type of clean (deep, standard, post-construction or Airbnb) before clocking in.' });
+  const buildChecklist = (shiftId) => {
+    if (db.prepare('SELECT COUNT(*) AS n FROM shift_checklist_items WHERE shift_id = ?').get(shiftId).n) return;
+    let i = 0;
+    for (const text of templateFor(serviceType)) db.prepare('INSERT INTO shift_checklist_items (shift_id, text, sort_order) VALUES (?,?,?)').run(shiftId, text.slice(0, 120), i++);
+  };
+  const shift = openShiftFor.get(id);
+  if (!shift) {
+    const info = db.prepare('INSERT INTO shifts (worker_id, clock_in, place, service_type, notes) VALUES (?,?,?,?,?)').run(id, Date.now(), place, serviceType, notes);
+    buildChecklist(info.lastInsertRowid);
+  } else {
+    db.prepare('UPDATE shifts SET place = ?, service_type = COALESCE(service_type, ?), notes = COALESCE(?, notes) WHERE id = ?').run(place, serviceType, notes, shift.id);
+    buildChecklist(shift.id);
+  }
   recordLocation(id, req.body, 'clock_in');
+  res.json({ ok: true });
+});
+
+// Worker ticks a shift checklist item.
+app.post('/api/shift-check/:id', (req, res) => {
+  const done = req.body.done ? 1 : 0;
+  db.prepare('UPDATE shift_checklist_items SET done = ?, done_at = ? WHERE id = ?').run(done, done ? Date.now() : null, Number(req.params.id));
+  res.json({ ok: true });
+});
+// Worker updates the client / property details for their current shift.
+app.post('/api/shift-notes', (req, res) => {
+  const shift = openShiftFor.get(Number(req.body.workerId));
+  if (shift) db.prepare('UPDATE shifts SET notes = ? WHERE id = ?').run((req.body.notes || '').toString().slice(0, 500) || null, shift.id);
   res.json({ ok: true });
 });
 
@@ -412,6 +450,11 @@ app.post('/api/clock-out', (req, res) => {
   const id = Number(req.body.workerId);
   const shift = openShiftFor.get(id);
   if (!shift) return res.json({ ok: true });
+  // The checklist must be finished before they can clock out (accountability).
+  if (getSetting('require_shift_checklist') === '1') {
+    const remaining = db.prepare('SELECT COUNT(*) AS n FROM shift_checklist_items WHERE shift_id = ? AND done = 0').get(shift.id).n;
+    if (remaining > 0) return res.status(400).json({ error: 'checklist', reason: `Finish the checklist first — ${remaining} item(s) left before you can clock out.` });
+  }
   const now = Date.now();
   const job = openJobFor.get(id);
   if (job) db.prepare('UPDATE jobs SET finished_at = ? WHERE id = ?').run(now, job.id);
@@ -429,14 +472,16 @@ app.post('/api/checklist/:itemId', (req, res) => {
 app.post('/api/photo', (req, res) => {
   const id = Number(req.body.workerId);
   const assignmentId = req.body.assignmentId ? Number(req.body.assignmentId) : null;
+  let shiftId = req.body.shiftId ? Number(req.body.shiftId) : null;
+  if (!shiftId && !assignmentId) { const s = openShiftFor.get(id); if (s) shiftId = s.id; }
   const dataUrl = (req.body.dataUrl || '').toString();
   const m = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/);
   if (!m) return res.status(400).json({ error: 'bad image' });
   const ext = m[1] === 'jpeg' ? 'jpg' : m[1];
   const filename = `${crypto.randomBytes(10).toString('hex')}.${ext}`;
   fs.writeFileSync(path.join(UPLOAD_DIR, filename), Buffer.from(m[2], 'base64'));
-  db.prepare('INSERT INTO photos (assignment_id, worker_id, filename, lat, lng, created_at) VALUES (?,?,?,?,?,?)')
-    .run(assignmentId, id, filename, req.body.lat ?? null, req.body.lng ?? null, Date.now());
+  db.prepare('INSERT INTO photos (assignment_id, shift_id, worker_id, filename, lat, lng, created_at) VALUES (?,?,?,?,?,?,?)')
+    .run(assignmentId, shiftId, id, filename, req.body.lat ?? null, req.body.lng ?? null, Date.now());
   recordLocation(id, req.body, 'photo');
   res.json({ ok: true, url: `/uploads/${filename}` });
 });
@@ -462,10 +507,17 @@ app.get('/api/admin/overview', requireAdmin, (req, res) => {
     const st = computeState(w.id);
     const loc = latestLocation.get(w.id);
     const assignments = todaysAssignments(w.id);
+    let checklist = null;
+    if (st.shift) {
+      const cl = shiftChecklist(st.shift.id);
+      checklist = { done: cl.filter((c) => c.done).length, total: cl.length, photos: shiftPhotos(st.shift.id).length };
+    }
     return {
       id: w.id, name: w.name, hourlyRate: workerRate(w),
       state: st.state, deadline: st.deadline, summary: todaySummary(w.id),
       place: st.shift ? st.shift.place : null,
+      serviceLabel: st.shift ? (SERVICE_TYPES[st.shift.service_type] || null) : null,
+      checklist,
       location: loc ? { lat: loc.lat, lng: loc.lng, at: loc.created_at, context: loc.context } : null,
       jobsScheduled: assignments.length, jobsDoneScheduled: assignments.filter((a) => a.status === 'done').length,
     };
@@ -478,6 +530,11 @@ app.get('/api/admin/overview', requireAdmin, (req, res) => {
       requirePhoto: getSetting('require_photo') === '1', requireChecklist: getSetting('require_checklist') === '1',
       calendarIcalUrl: getSetting('calendar_ical_url') || '',
       checkinMinutes: Number(getSetting('checkin_minutes')),
+      requireShiftChecklist: getSetting('require_shift_checklist') === '1',
+      checklistStandard: getSetting('checklist_standard') || '',
+      checklistDeep: getSetting('checklist_deep') || '',
+      checklistPostconstruction: getSetting('checklist_postconstruction') || '',
+      checklistAirbnb: getSetting('checklist_airbnb') || '',
       ...brand(),
     },
     serverNow: Date.now(),
@@ -534,7 +591,7 @@ app.post('/api/admin/workers/:id/remove', requireAdmin, (req, res) => {
 });
 
 app.post('/api/admin/settings', requireAdmin, (req, res) => {
-  const allowed = ['travel_minutes', 'penalty_hours', 'hourly_rate', 'currency', 'business_name', 'brand_color', 'require_photo', 'require_checklist', 'calendar_ical_url', 'checkin_minutes'];
+  const allowed = ['travel_minutes', 'penalty_hours', 'hourly_rate', 'currency', 'business_name', 'brand_color', 'require_photo', 'require_checklist', 'calendar_ical_url', 'checkin_minutes', 'require_shift_checklist', 'checklist_standard', 'checklist_deep', 'checklist_postconstruction', 'checklist_airbnb'];
   for (const key of allowed) if (req.body[key] !== undefined) setSetting.run(key, String(req.body[key]));
   res.json({ ok: true });
 });
@@ -720,6 +777,20 @@ app.post('/api/admin/shifts/:id/delete', requireAdmin, (req, res) => {
     console.error('shift delete failed', e.message);
     res.status(500).json({ error: 'Could not delete: ' + e.message });
   }
+});
+
+// Owner reviews a shift's quality: service type, checklist, photos, notes.
+app.get('/api/admin/shift/:id', requireAdmin, (req, res) => {
+  const s = db.prepare('SELECT s.*, w.name FROM shifts s JOIN workers w ON w.id = s.worker_id WHERE s.id = ?').get(Number(req.params.id));
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const photos = db.prepare('SELECT id, filename, lat, lng, created_at FROM photos WHERE shift_id = ? ORDER BY created_at').all(s.id);
+  res.json({
+    id: s.id, worker: s.name, place: s.place, notes: s.notes,
+    serviceType: s.service_type, serviceLabel: SERVICE_TYPES[s.service_type] || null,
+    clockIn: s.clock_in, clockOut: s.clock_out,
+    checklist: shiftChecklist(s.id),
+    photos: photos.map((p) => ({ id: p.id, url: `/uploads/${p.filename}`, at: p.created_at, lat: p.lat, lng: p.lng })),
+  });
 });
 
 // Owner edits a shift's clock-in / clock-out (epoch ms from the browser).
