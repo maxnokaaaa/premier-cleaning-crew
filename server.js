@@ -28,7 +28,16 @@ app.use((err, req, res, next) => {
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 app.use('/uploads', express.static(UPLOAD_DIR));
-app.use(express.static(path.join(__dirname, 'public')));
+
+// Never let a phone cache the app itself — a stale copy looks like "the app is broken"
+// (e.g. an old login screen that rejects the current PIN). Photos stay cacheable.
+app.use((req, res, next) => {
+  if (/\.(html|js|json)$/.test(req.path) || req.path === '/' || req.path === '/admin') {
+    res.set('Cache-Control', 'no-store, must-revalidate');
+  }
+  next();
+});
+app.use(express.static(path.join(__dirname, 'public'), { etag: false, lastModified: false }));
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_PIN = process.env.ADMIN_PIN || '1234';
