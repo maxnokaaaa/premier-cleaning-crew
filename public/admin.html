@@ -102,10 +102,46 @@ const fmtTime=(t)=>new Date(t).toLocaleTimeString([], {hour:'2-digit',minute:'2-
 const fmtDate=(t)=>new Date(t).toLocaleDateString([], {day:'numeric',month:'short'});
 function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
+// The free host sleeps after 15 min; the first request can take ~50s or fail.
+// Retry a few times and tell the user what's happening instead of failing silently.
+async function fetchRetry(url, opts, tries){
+  tries = tries || 4;
+  let lastErr;
+  for(let i=0;i<tries;i++){
+    try{
+      const r = await fetch(url, opts);
+      const text = await r.text();
+      if(!text) throw new Error('empty response');
+      return { ok:r.ok, status:r.status, data: JSON.parse(text) };
+    }catch(e){
+      lastErr = e;
+      if(i < tries-1) await new Promise(res=>setTimeout(res, 2500));
+    }
+  }
+  throw lastErr;
+}
+
 async function login(){
   const pin=$('pin').value.trim();
-  const ok=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin})}).then(r=>r.json());
-  if(ok.ok){ PIN=pin; localStorage.setItem('crew_pin',pin); enter(); } else $('loginErr').textContent='Wrong PIN, try again.';
+  if(!pin){ $('loginErr').textContent='Enter your PIN.'; return; }
+  const btn=document.querySelector('#login .btn');
+  const err=$('loginErr');
+  if(btn){ btn.disabled=true; btn.textContent='Checking…'; }
+  err.style.color='var(--muted)';
+  err.textContent='Waking up the server, this can take up to a minute the first time…';
+  try{
+    const res = await fetchRetry('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin})});
+    if(res.data && res.data.ok){
+      PIN=pin; localStorage.setItem('crew_pin',pin); err.textContent=''; enter();
+    } else {
+      err.style.color='var(--red)'; err.textContent='Wrong PIN, try again.';
+    }
+  }catch(e){
+    err.style.color='var(--red)';
+    err.textContent='Could not reach the server. Check your internet and try again.';
+  }finally{
+    if(btn){ btn.disabled=false; btn.textContent='Enter'; }
+  }
 }
 function logout(){ localStorage.removeItem('crew_pin'); PIN=''; clearInterval(pollTimer); clearInterval(tickTimer); $('app').classList.add('hidden'); $('login').classList.remove('hidden'); }
 function enter(){ $('login').classList.add('hidden'); $('app').classList.remove('hidden'); showTab('live'); clearInterval(pollTimer); pollTimer=setInterval(()=>{ if(cur==='live') loadLive(); }, 12000); }

@@ -121,7 +121,29 @@ const $ = (id)=>document.getElementById(id);
 let me=null, poll=null, tick=null, deadline=null, skew=0, lastData=null;
 const initials=(n)=>n.split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase();
 
-function toast(msg){ const t=document.createElement('div'); t.className='toast'; t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t.remove(),2600); }
+function toast(msg,ms){ const t=document.createElement('div'); t.className='toast'; t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t.remove(),ms||2600); return t; }
+
+// The free host sleeps after 15 min — the first request of the day can take ~50s.
+// Retry rather than leaving a cleaner staring at a dead button.
+async function fetchRetry(url, opts, tries){
+  tries = tries || 4;
+  let lastErr, notice;
+  for(let i=0;i<tries;i++){
+    try{
+      const r = await fetch(url, opts);
+      const text = await r.text();
+      if(!text) throw new Error('empty response');
+      if(notice) notice.remove();
+      return { ok:r.ok, status:r.status, data: JSON.parse(text) };
+    }catch(e){
+      lastErr = e;
+      if(i===0) notice = toast('Connecting… this can take a minute the first time', 60000);
+      if(i < tries-1) await new Promise(res=>setTimeout(res, 2500));
+    }
+  }
+  if(notice) notice.remove();
+  throw lastErr;
+}
 
 // Best-effort GPS (never blocks the action).
 function getGPS(){
@@ -147,8 +169,15 @@ async function boot(){
 }
 
 async function loadWorkers(){
-  const list = await fetch('/api/workers').then(r=>r.json());
   const box=$('workerList');
+  let list;
+  try{
+    box.innerHTML='<p style="text-align:center;color:var(--muted)">Loading…</p>';
+    list = (await fetchRetry('/api/workers')).data;
+  }catch(e){
+    box.innerHTML='<p style="text-align:center;color:var(--red)">Couldn\'t connect.<br><button class="btn ghost" style="margin-top:12px" onclick="loadWorkers()">Try again</button></p>';
+    return;
+  }
   if(!list.length){ box.innerHTML='<p style="text-align:center;color:var(--muted)">No workers yet. Your manager will add you.</p>'; return; }
   box.innerHTML='';
   for(const w of list){ const b=document.createElement('button'); b.className='name-btn'; b.innerHTML=`<span class="avatar">${initials(w.name)}</span><span>${w.name}</span>`; b.onclick=()=>selectWorker(w); box.appendChild(b); }
@@ -276,8 +305,14 @@ function renderShiftJob(d){
 
 async function act(path, extra){
   const gps = await getGPS();
-  await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({workerId:me.id, ...gps, ...(extra||{})})})
-    .then(async r=>{ if(!r.ok){ const e=await r.json().catch(()=>({})); if(e.reason) toast(e.reason); } });
+  try{
+    const res = await fetchRetry(path, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({workerId:me.id, ...gps, ...(extra||{})})});
+    if(!res.ok && res.data && res.data.reason) toast(res.data.reason, 4000);
+  }catch(e){
+    toast('No connection — nothing was saved. Try again.', 4000);
+    return;
+  }
   await refresh();
 }
 
@@ -291,7 +326,10 @@ const STATES = {
 
 async function refresh(){
   if(!me) return;
-  const d = await fetch('/api/me/'+me.id).then(r=>r.json()); lastData=d;
+  let d;
+  try{ d = (await fetchRetry('/api/me/'+me.id)).data; }
+  catch(e){ toast('No connection — showing your last known status', 3500); return; }
+  lastData=d;
   skew = d.serverNow - Date.now();
   const s = STATES[d.state]||STATES.off;
   $('dot').style.background=s.color; $('stateLabel').textContent=s.label; $('stateBig').textContent=s.big;
