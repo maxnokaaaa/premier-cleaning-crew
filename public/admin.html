@@ -69,6 +69,7 @@
       <div class="tab on" data-tab="live" onclick="showTab('live')">Live crew</div>
       <div class="tab" data-tab="today" onclick="showTab('today')">Today 💶</div>
       <div class="tab" data-tab="wages" onclick="showTab('wages')">Wages 💰</div>
+      <div class="tab" data-tab="jobcosts" onclick="showTab('jobcosts')">Job costs 📊</div>
       <div class="tab" data-tab="schedule" onclick="showTab('schedule')">Schedule</div>
       <div class="tab" data-tab="payroll" onclick="showTab('payroll')">Payroll</div>
       <div class="tab" data-tab="messages" onclick="showTab('messages')">Messages</div>
@@ -80,6 +81,7 @@
     <div id="tab-live"></div>
     <div id="tab-today" class="hidden"></div>
     <div id="tab-wages" class="hidden"></div>
+    <div id="tab-jobcosts" class="hidden"></div>
     <div id="tab-schedule" class="hidden"></div>
     <div id="tab-payroll" class="hidden"></div>
     <div id="tab-messages" class="hidden"></div>
@@ -149,8 +151,8 @@ function enter(){ $('login').classList.add('hidden'); $('app').classList.remove(
 function showTab(t){
   cur=t;
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('on', el.dataset.tab===t));
-  ['live','today','wages','schedule','payroll','messages','penalties','log','workers','settings'].forEach(x=>$('tab-'+x).classList.toggle('hidden', x!==t));
-  ({live:loadLive, today:loadToday, wages:loadWages, schedule:loadSchedule, payroll:loadPayroll, messages:loadMessages, penalties:loadPenalties, log:loadLog, workers:loadWorkers, settings:loadSettings})[t]();
+  ['live','today','wages','jobcosts','schedule','payroll','messages','penalties','log','workers','settings'].forEach(x=>$('tab-'+x).classList.toggle('hidden', x!==t));
+  ({live:loadLive, today:loadToday, wages:loadWages, jobcosts:loadJobCosts, schedule:loadSchedule, payroll:loadPayroll, messages:loadMessages, penalties:loadPenalties, log:loadLog, workers:loadWorkers, settings:loadSettings})[t]();
 }
 
 const SM={ off:{txt:'Clocked out',c:'#93a2bf'}, idle:{txt:'On shift (idle)',c:'#2f6bff'}, working:{txt:'Working',c:'#16c07a'}, traveling:{txt:'Travelling',c:'#f4a723'}, late:{txt:'OVERDUE',c:'#f0524f'} };
@@ -280,6 +282,64 @@ async function deleteShift(id){
   if(!confirm('Delete this shift completely? Its wages come off the bill. This cannot be undone.')) return;
   await fetch('/api/admin/shifts/'+id+'/delete',{method:'POST',headers:hdr(),body:'{}'});
   loadWages();
+}
+
+// ---------- Job costs: what each client actually cost you in wages ----------
+let jcFrom='', jcTo='';
+async function loadJobCosts(){
+  const q=[]; if(jcFrom) q.push('from='+jcFrom); if(jcTo) q.push('to='+jcTo);
+  const d=await fetch('/api/admin/jobcosts'+(q.length?'?'+q.join('&'):''),{headers:hdr()}).then(r=>r.json());
+  const cur=d.currency;
+  let html=`<div class="row" style="margin:2px 4px 10px"><h3 style="margin:0">📊 Cost per job</h3>
+    <div style="display:flex;gap:6px;align-items:center">
+      <input type="date" style="width:auto" value="${jcFrom}" onchange="jcFrom=this.value; loadJobCosts()">
+      <span class="muted">→</span>
+      <input type="date" style="width:auto" value="${jcTo}" onchange="jcTo=this.value; loadJobCosts()">
+      ${(jcFrom||jcTo)?'<button class="btn ghost small" onclick="jcFrom=\'\';jcTo=\'\';loadJobCosts()">All</button>':''}
+    </div></div>
+    <div class="kpi">
+      <div class="card"><b>${cur}${d.totals.cost.toFixed(2)}</b><span>total labour cost</span></div>
+      <div class="card"><b>${d.totals.hours.toFixed(1)}h</b><span>total hours</span></div>
+      <div class="card"><b>${d.totals.jobs}</b><span>clients / jobs</span></div>
+    </div>`;
+  if(!d.jobs.length) html+=`<div class="card muted">No shifts in this period.</div>`;
+  for(const j of d.jobs){
+    const share=d.totals.cost? Math.round(j.cost/d.totals.cost*100):0;
+    html+=`<div class="card"><div class="row">
+        <div><div class="name">${escapeHtml(j.client)}${j.openShifts?' <span class="badge" style="background:rgba(244,167,35,.2);color:#f4a723">'+j.openShifts+' still open</span>':''}</div>
+          <div class="sub">${j.visits} visit${j.visits===1?'':'s'} · ${j.hours.toFixed(2)}h · ${j.serviceTypes.length?escapeHtml(j.serviceTypes.join(', ')):'—'}</div></div>
+        <div style="text-align:right"><b style="font-size:20px">${cur}${j.cost.toFixed(2)}</b>
+          <div class="sub">${cur}${j.avgCostPerVisit.toFixed(2)} / visit</div></div></div>
+      <div style="height:6px;background:var(--card2);border-radius:4px;margin:10px 0 6px;overflow:hidden">
+        <div style="height:100%;width:${share}%;background:var(--brand)"></div></div>
+      <div class="sub" style="margin-bottom:6px">${share}% of your wage bill · ${fmtDate(j.firstAt)} → ${fmtDate(j.lastAt)}</div>
+      <details><summary style="color:var(--blue);cursor:pointer">Who worked it</summary>
+        <table style="margin-top:6px"><tr><th>Worker</th><th>Rate</th><th>Hours</th><th>Cost</th></tr>
+        ${j.workers.map(w=>`<tr><td>${escapeHtml(w.name)}</td><td>${cur}${w.rate}/h</td><td>${w.hours.toFixed(2)}h</td><td><b>${cur}${w.cost.toFixed(2)}</b></td></tr>`).join('')}
+        </table>
+        <button class="btn ghost small" style="margin-top:8px" onclick="renameClient('${j.client.replace(/'/g,"\\'")}')">Fix / merge this name</button>
+      </details></div>`;
+  }
+  html+=`<button class="btn brand" onclick="exportJobCosts()">⬇ Export as CSV</button>`;
+  $('tab-jobcosts').innerHTML=html;
+  window._jobcosts=d;
+}
+async function renameClient(from){
+  const to=prompt('Rename this client everywhere (use this to fix typos or merge duplicates):', from);
+  if(!to || to===from) return;
+  await fetch('/api/admin/rename-client',{method:'POST',headers:hdr(),body:JSON.stringify({from,to})});
+  loadJobCosts();
+}
+function exportJobCosts(){
+  const d=window._jobcosts;
+  let csv='Client,Visits,Hours,Labour cost,Avg per visit,Service types,Workers\n';
+  for(const j of d.jobs){
+    const who=j.workers.map(w=>`${w.name} ${w.hours.toFixed(2)}h`).join('; ');
+    csv+=`"${j.client}",${j.visits},${j.hours},${j.cost},${j.avgCostPerVisit},"${j.serviceTypes.join(', ')}","${who}"\n`;
+  }
+  csv+=`"TOTAL",,${d.totals.hours},${d.totals.cost},,,\n`;
+  const b=new Blob([csv],{type:'text/csv'}); const a=document.createElement('a');
+  a.href=URL.createObjectURL(b); a.download='job-costs.csv'; a.click();
 }
 
 // ---------- Schedule ----------
@@ -425,8 +485,8 @@ async function loadWorkers(){
     fetch('/api/clients').then(r=>r.json()).catch(()=>[]),
   ]);
   const cur=(settingsCache&&settingsCache.currency)||'€';
-  let html=`<div class="card" style="border-color:var(--brand)"><h3>🏠 Clients / sites — workers MUST pick one to clock in</h3>
-    <p class="muted" style="margin-top:0">Nobody can start their day without choosing a job from this list (plus that day's calendar jobs). This is what ties every hour to a client.</p>
+  let html=`<div class="card" style="border-color:var(--brand)"><h3>🏠 Client suggestions</h3>
+    <p class="muted" style="margin-top:0">Workers <b>type</b> the client name when they clock in — they can't start without one. These names autocomplete for them, and any new name they type is added here automatically. Keeping the spelling consistent is what makes <b>Job costs 📊</b> accurate.</p>
     <div class="row"><input id="newClient" placeholder="Client or site name (e.g. Tonio — Mellieħa)"><button class="btn brand" onclick="addClient()">Add</button></div>
     <div style="margin-top:12px">${clients.length?clients.map(c=>`<span class="pill" style="background:var(--card2);color:var(--text);display:inline-block;margin:0 6px 6px 0;padding:7px 12px">${escapeHtml(c.name)} <a href="javascript:void(0)" onclick="removeClient(${c.id})" style="color:var(--red);text-decoration:none">✕</a></span>`).join(''):'<span class="muted">No clients yet — add your regulars so the crew can tag their hours.</span>'}</div>
   </div>

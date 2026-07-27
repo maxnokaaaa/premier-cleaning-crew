@@ -380,13 +380,15 @@ function renderActions(d){
     // Compulsory before clocking in: pick client, pick clean type. This is arrival + accountability.
     const cal=(d.calendarJobs||[]).map(j=>j.client||j.title).filter(Boolean);
     const names=[...new Set([...cal, ...clientList.map(c=>c.name)])];
-    const opts=names.map(n=>`<option value="${n.replace(/"/g,'&quot;')}" ${n===prevPlace?'selected':''}>${escapeHtml(n)}</option>`).join('');
+    const opts=names.map(n=>`<option value="${n.replace(/"/g,'&quot;')}"></option>`).join('');
     const svc=d.serviceTypes||{standard:'Standard clean',deep:'Deep clean',postconstruction:'Post-construction',airbnb:'Airbnb turnover'};
     const svcBtns=Object.entries(svc).map(([k,l])=>`<button type="button" class="svcbtn ${selectedService===k?'on':''}" data-svc="${k}" onclick="pickService('${k}')">${escapeHtml(l)}</button>`).join('');
     box.insertAdjacentHTML('beforeend',
       `<div class="section-title" style="margin:14px 4px 6px">1 · Which client / job?</div>
-       <select id="placeInput" class="field"><option value="">— choose your client / job —</option>${opts}</select>
-       ${names.length?'':'<p class="sub" style="margin:8px 4px 0">No clients set up yet — ask your manager to add them.</p>'}
+       <input id="placeInput" class="field" list="clientNames" autocomplete="off" autocapitalize="words"
+              value="${prevPlace.replace(/"/g,'&quot;')}" placeholder="Type the client name (e.g. Tonio — Mellieħa)">
+       <datalist id="clientNames">${opts}</datalist>
+       <p class="sub" style="margin:6px 4px 0">Start typing — past clients will suggest themselves.</p>
        <div class="section-title" style="margin:16px 4px 6px">2 · Type of clean</div>
        <div class="svcgrid">${svcBtns}</div>
        <div class="section-title" style="margin:16px 4px 6px">3 · Client / property details <span style="text-transform:none">(access, condition…)</span></div>

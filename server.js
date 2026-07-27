@@ -350,6 +350,9 @@ app.post('/api/clock-in', (req, res) => {
     let i = 0;
     for (const text of templateFor(serviceType)) db.prepare('INSERT INTO shift_checklist_items (shift_id, text, sort_order) VALUES (?,?,?)').run(shiftId, text.slice(0, 120), i++);
   };
+  // Remember any newly typed client so it autocompletes next time (list self-maintains).
+  const known = db.prepare('SELECT id FROM clients WHERE lower(name) = lower(?)').get(place);
+  if (!known) db.prepare('INSERT INTO clients (name, active, created_at) VALUES (?,1,?)').run(place, Date.now());
   const shift = openShiftFor.get(id);
   if (!shift) {
     const info = db.prepare('INSERT INTO shifts (worker_id, clock_in, place, service_type, notes) VALUES (?,?,?,?,?)').run(id, Date.now(), place, serviceType, notes);
@@ -802,6 +805,63 @@ app.get('/api/admin/wages', requireAdmin, (req, res) => {
     return { id: w.id, name: w.name, rate, shifts, hours: +hours.toFixed(2), pay: +pay.toFixed(2) };
   }).filter((w) => w.shifts.length);
   res.json({ currency, workers: out, totals: { hours: +grandHours.toFixed(2), pay: +grandPay.toFixed(2), suspects } });
+});
+
+// ---- cost per job / client ----
+// Groups every shift by the client name the worker typed, so you can see exactly
+// what each job cost you in wages.
+app.get('/api/admin/jobcosts', requireAdmin, (req, res) => {
+  const now = Date.now();
+  const currency = getSetting('currency');
+  const from = req.query.from ? new Date(req.query.from + 'T00:00:00').getTime() : 0;
+  const to = req.query.to ? new Date(req.query.to + 'T23:59:59').getTime() : Number.MAX_SAFE_INTEGER;
+  const rows = db.prepare(
+    `SELECT s.id, s.worker_id, s.clock_in, s.clock_out, s.place, s.service_type, w.name, w.hourly_rate
+     FROM shifts s JOIN workers w ON w.id = s.worker_id
+     WHERE s.clock_in >= ? AND s.clock_in <= ? ORDER BY s.clock_in`
+  ).all(from, to);
+
+  const jobs = new Map();
+  let grandCost = 0, grandHours = 0;
+  for (const r of rows) {
+    const key = (r.place || '(no client entered)').trim();
+    const rate = workerRate(r);
+    const hours = Math.max(0, ((r.clock_out || now) - r.clock_in) / 3600000);
+    const cost = hours * rate;
+    grandCost += cost; grandHours += hours;
+    if (!jobs.has(key)) jobs.set(key, { client: key, hours: 0, cost: 0, shifts: 0, open: 0, workers: new Map(), types: new Set(), first: r.clock_in, last: r.clock_in, visits: new Set() });
+    const j = jobs.get(key);
+    j.hours += hours; j.cost += cost; j.shifts++;
+    if (!r.clock_out) j.open++;
+    if (r.service_type) j.types.add(SERVICE_TYPES[r.service_type] || r.service_type);
+    j.first = Math.min(j.first, r.clock_in); j.last = Math.max(j.last, r.clock_in);
+    j.visits.add(new Date(r.clock_in).toDateString());
+    const w = j.workers.get(r.name) || { name: r.name, hours: 0, cost: 0, rate };
+    w.hours += hours; w.cost += cost; j.workers.set(r.name, w);
+  }
+
+  const out = [...jobs.values()].map((j) => ({
+    client: j.client, hours: +j.hours.toFixed(2), cost: +j.cost.toFixed(2),
+    shifts: j.shifts, openShifts: j.open, visits: j.visits.size,
+    serviceTypes: [...j.types], firstAt: j.first, lastAt: j.last,
+    avgCostPerVisit: +(j.cost / j.visits.size).toFixed(2),
+    workers: [...j.workers.values()].map((w) => ({ ...w, hours: +w.hours.toFixed(2), cost: +w.cost.toFixed(2) }))
+      .sort((a, b) => b.cost - a.cost),
+  })).sort((a, b) => b.cost - a.cost);
+
+  res.json({ currency, jobs: out, totals: { cost: +grandCost.toFixed(2), hours: +grandHours.toFixed(2), jobs: out.length } });
+});
+
+// Rename a client everywhere (fixes typos / merges duplicates like "Tonio" vs "tonio").
+app.post('/api/admin/rename-client', requireAdmin, (req, res) => {
+  const from = (req.body.from || '').toString().trim();
+  const to = (req.body.to || '').toString().trim();
+  if (!from || !to) return res.status(400).json({ error: 'need both names' });
+  db.prepare('UPDATE shifts SET place = ? WHERE place = ?').run(to, from);
+  db.prepare('DELETE FROM clients WHERE lower(name) = lower(?)').run(from);
+  const exists = db.prepare('SELECT id FROM clients WHERE lower(name) = lower(?)').get(to);
+  if (!exists) db.prepare('INSERT INTO clients (name, active, created_at) VALUES (?,1,?)').run(to, Date.now());
+  res.json({ ok: true });
 });
 
 // Remove a shift entirely (takes its wages off the bill).
