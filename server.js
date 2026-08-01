@@ -296,6 +296,28 @@ function capRunawayShifts() {
 setInterval(capRunawayShifts, 5 * 60 * 1000);
 capRunawayShifts();
 
+// ---------- keep-awake ----------
+// The free host sleeps after ~15 minutes with no INBOUND traffic, which is what
+// caused the ~50s wait first thing in the morning. Calling our own public URL
+// counts as inbound traffic, so the idle timer keeps resetting and the app
+// stays up. Render sets RENDER_EXTERNAL_URL for us.
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || process.env.SELF_URL;
+if (SELF_URL) {
+  const ping = async () => {
+    try {
+      const r = await fetch(`${SELF_URL.replace(/\/$/, '')}/api/health`, { signal: AbortSignal.timeout(20000) });
+      if (!r.ok) console.error('keep-awake ping got HTTP', r.status);
+    } catch (e) {
+      console.error('keep-awake ping failed:', e.message);
+    }
+  };
+  setInterval(ping, 10 * 60 * 1000); // every 10 minutes, comfortably inside the 15-min window
+  setTimeout(ping, 30 * 1000);
+  console.log('Keep-awake enabled →', SELF_URL);
+} else {
+  console.log('Keep-awake off (no RENDER_EXTERNAL_URL) — fine for local runs');
+}
+
 // ================= WORKER API =================
 // Cheap endpoint the keep-awake ping hits, and a quick way to see the app is healthy.
 app.get('/api/health', (req, res) => {
