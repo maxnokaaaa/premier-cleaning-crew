@@ -188,6 +188,9 @@ if (!shiftCols.includes('service_type')) {
 if (!shiftCols.includes('notes')) {
   db.exec('ALTER TABLE shifts ADD COLUMN notes TEXT'); // client / property details the cleaner fills in
 }
+if (!shiftCols.includes('auto_closed')) {
+  db.exec('ALTER TABLE shifts ADD COLUMN auto_closed INTEGER NOT NULL DEFAULT 0'); // capped after a forgotten clock-out
+}
 const photoCols2 = db.prepare('PRAGMA table_info(photos)').all().map((c) => c.name);
 if (!photoCols2.includes('shift_id')) {
   db.exec('ALTER TABLE photos ADD COLUMN shift_id INTEGER'); // photos can belong to a shift, not just an assignment
@@ -206,6 +209,7 @@ const DEFAULT_SETTINGS = {
   calendar_ical_url: '',  // Premier calendar "Secret address in iCal format" — jobs flow in from here
   checkin_minutes: '30',  // how often to push a "still on the job?" check-in while clocked in (0 = off)
   require_shift_checklist: '1', // must complete the checklist before clocking out
+  max_shift_hours: '14',  // a shift left running longer than this is auto-capped for review (0 = off)
   checklist_standard: [
     'Kitchen surfaces & sink cleaned',
     'Hob & outside of appliances wiped',

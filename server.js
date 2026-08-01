@@ -271,7 +271,45 @@ function checkInSweep() {
 }
 setInterval(checkInSweep, 60 * 1000);
 
+// ---------- runaway-shift guard ----------
+// A forgotten clock-out used to run for days and invent thousands in wages.
+// Cap any shift that passes max_shift_hours, flag it for review, and tell the
+// worker. The owner then sets the real finish time in Today / Wages.
+function capRunawayShifts() {
+  const maxH = Number(getSetting('max_shift_hours'));
+  if (!maxH || maxH <= 0) return;
+  const now = Date.now();
+  const limit = maxH * 3600000;
+  const open = db.prepare('SELECT s.*, w.name FROM shifts s JOIN workers w ON w.id = s.worker_id WHERE s.clock_out IS NULL').all();
+  for (const s of open) {
+    if (now - s.clock_in <= limit) continue;
+    const cappedAt = s.clock_in + limit;
+    db.prepare('UPDATE shifts SET clock_out = ?, auto_closed = 1 WHERE id = ?').run(cappedAt, s.id);
+    console.log(`Auto-capped runaway shift ${s.id} (${s.name}) at ${maxH}h — needs review`);
+    sendPush(s.worker_id, {
+      title: '⏰ You forgot to clock out',
+      body: `Your shift was closed automatically after ${maxH} hours. Tell Max what time you actually finished so your pay is right.`,
+      url: '/',
+    });
+  }
+}
+setInterval(capRunawayShifts, 5 * 60 * 1000);
+capRunawayShifts();
+
 // ================= WORKER API =================
+// Cheap endpoint the keep-awake ping hits, and a quick way to see the app is healthy.
+app.get('/api/health', (req, res) => {
+  let dbOk = true;
+  try { db.prepare('SELECT 1').get(); } catch (e) { dbOk = false; }
+  res.json({
+    ok: dbOk,
+    business: getSetting('business_name'),
+    workers: db.prepare('SELECT COUNT(*) AS n FROM workers WHERE active = 1').get().n,
+    openShifts: db.prepare('SELECT COUNT(*) AS n FROM shifts WHERE clock_out IS NULL').get().n,
+    time: new Date().toISOString(),
+  });
+});
+
 app.get('/api/config', (req, res) => res.json(brand()));
 
 app.get('/api/workers', (req, res) => {
@@ -631,7 +669,7 @@ app.post('/api/admin/workers/:id/remove', requireAdmin, (req, res) => {
 });
 
 app.post('/api/admin/settings', requireAdmin, (req, res) => {
-  const allowed = ['travel_minutes', 'penalty_hours', 'hourly_rate', 'currency', 'business_name', 'brand_color', 'require_photo', 'require_checklist', 'calendar_ical_url', 'checkin_minutes', 'require_shift_checklist', 'checklist_standard', 'checklist_deep', 'checklist_postconstruction', 'checklist_airbnb'];
+  const allowed = ['travel_minutes', 'penalty_hours', 'hourly_rate', 'currency', 'business_name', 'brand_color', 'require_photo', 'require_checklist', 'calendar_ical_url', 'checkin_minutes', 'require_shift_checklist', 'max_shift_hours', 'checklist_standard', 'checklist_deep', 'checklist_postconstruction', 'checklist_airbnb'];
   for (const key of allowed) if (req.body[key] !== undefined) setSetting.run(key, String(req.body[key]));
   res.json({ ok: true });
 });
@@ -789,14 +827,15 @@ app.get('/api/admin/wages', requireAdmin, (req, res) => {
     const shifts = db.prepare('SELECT * FROM shifts WHERE worker_id = ? ORDER BY clock_in').all(w.id).map((s) => {
       const end = s.clock_out || now;
       const hours = Math.max(0, (end - s.clock_in) / 3600000);
-      // flag impossible shifts: longer than 14h, or an accidental tap under 5 minutes
-      const suspect = hours > 14 || hours < 0.08;
+      // flag: auto-capped after a forgotten clock-out, impossibly long, or an accidental tap
+      const suspect = !!s.auto_closed || hours > 14 || hours < 0.08;
       if (suspect) suspects++;
       const cl = shiftChecklist(s.id);
       const photoN = db.prepare('SELECT COUNT(*) AS n FROM photos WHERE shift_id = ?').get(s.id).n;
       return { shiftId: s.id, clockIn: s.clock_in, clockOut: s.clock_out, open: !s.clock_out,
         place: s.place || null, serviceLabel: SERVICE_TYPES[s.service_type] || null,
         checklistDone: cl.filter((c) => c.done).length, checklistTotal: cl.length, photos: photoN,
+        autoClosed: !!s.auto_closed,
         hours: +hours.toFixed(2), pay: +(hours * rate).toFixed(2), suspect };
     });
     const hours = shifts.reduce((a, b) => a + b.hours, 0);
