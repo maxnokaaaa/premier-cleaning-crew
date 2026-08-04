@@ -41,6 +41,9 @@ app.use(express.static(path.join(__dirname, 'public'), { etag: false, lastModifi
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_PIN = process.env.ADMIN_PIN || '1234';
+// Keep-awake state (the free host sleeps after ~15 min with no inbound traffic).
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || process.env.SELF_URL;
+let lastPingAt = null, lastPingOk = null;
 
 // ---------- settings helpers ----------
 const getSetting = (k) => db.prepare('SELECT value FROM settings WHERE key = ?').get(k)?.value;
@@ -301,13 +304,14 @@ capRunawayShifts();
 // caused the ~50s wait first thing in the morning. Calling our own public URL
 // counts as inbound traffic, so the idle timer keeps resetting and the app
 // stays up. Render sets RENDER_EXTERNAL_URL for us.
-const SELF_URL = process.env.RENDER_EXTERNAL_URL || process.env.SELF_URL;
 if (SELF_URL) {
   const ping = async () => {
     try {
-      const r = await fetch(`${SELF_URL.replace(/\/$/, '')}/api/health`, { signal: AbortSignal.timeout(20000) });
+      const r = await fetch(`${SELF_URL.replace(/\/$/, '')}/api/ping`, { signal: AbortSignal.timeout(20000) });
+      lastPingAt = Date.now(); lastPingOk = r.ok;
       if (!r.ok) console.error('keep-awake ping got HTTP', r.status);
     } catch (e) {
+      lastPingAt = Date.now(); lastPingOk = false;
       console.error('keep-awake ping failed:', e.message);
     }
   };
@@ -320,6 +324,9 @@ if (SELF_URL) {
 
 // ================= WORKER API =================
 // Cheap endpoint the keep-awake ping hits, and a quick way to see the app is healthy.
+// Ultra-light endpoint for uptime pingers (no DB work).
+app.get('/api/ping', (req, res) => res.type('text/plain').send('pong'));
+
 app.get('/api/health', (req, res) => {
   let dbOk = true;
   try { db.prepare('SELECT 1').get(); } catch (e) { dbOk = false; }
@@ -328,6 +335,10 @@ app.get('/api/health', (req, res) => {
     business: getSetting('business_name'),
     workers: db.prepare('SELECT COUNT(*) AS n FROM workers WHERE active = 1').get().n,
     openShifts: db.prepare('SELECT COUNT(*) AS n FROM shifts WHERE clock_out IS NULL').get().n,
+    keepAwake: SELF_URL ? 'on' : 'off',
+    upSeconds: Math.round(process.uptime()),
+    lastPing: lastPingAt ? new Date(lastPingAt).toISOString() : null,
+    lastPingOk: lastPingOk,
     time: new Date().toISOString(),
   });
 });
